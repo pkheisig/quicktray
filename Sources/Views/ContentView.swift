@@ -15,6 +15,14 @@ struct ContentView: View {
                     .foregroundColor(.primary)
                 Spacer()
                 
+                Stepper(value: $clipboardManager.unpinnedRetentionLimit, in: 1...500) {
+                    Text("Keep \(clipboardManager.unpinnedRetentionLimit) unpinned")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .controlSize(.small)
+                .help("Set how many unpinned items to retain")
+                
                 if showClearConfirmation {
                     HStack(spacing: 8) {
                         Text("Sure?")

@@ -48,6 +48,17 @@ struct ClipboardItem: Identifiable, Hashable, Codable {
 }
 
 class ClipboardManager: ObservableObject {
+    private static let retentionLimitKey = "unpinnedRetentionLimit"
+    private static let defaultUnpinnedRetentionLimit = 20
+    private static let minUnpinnedRetentionLimit = 1
+    private static let maxUnpinnedRetentionLimit = 500
+    
+    @Published var unpinnedRetentionLimit: Int {
+        didSet {
+            persistAndApplyRetentionLimit()
+        }
+    }
+    
     @Published var items: [ClipboardItem] = [] {
         didSet {
             saveItems()
@@ -56,6 +67,10 @@ class ClipboardManager: ObservableObject {
     private var timer: Timer?
     private let pasteboard = NSPasteboard.general
     private var lastChangeCount: Int
+    
+    private static func clampedRetentionLimit(_ value: Int) -> Int {
+        min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
+    }
     
     private var persistenceURL: URL? {
         guard let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
@@ -68,8 +83,12 @@ class ClipboardManager: ObservableObject {
     }
     
     init() {
+        let savedLimit = UserDefaults.standard.integer(forKey: Self.retentionLimitKey)
+        let initialLimit = savedLimit > 0 ? savedLimit : Self.defaultUnpinnedRetentionLimit
+        self.unpinnedRetentionLimit = Self.clampedRetentionLimit(initialLimit)
         self.lastChangeCount = pasteboard.changeCount
         loadItems()
+        trimUnpinnedItemsToLimit()
         startMonitoring()
     }
     
@@ -103,11 +122,7 @@ class ClipboardManager: ObservableObject {
             let pinnedCount = self.items.filter { $0.isPinned }.count
             self.items.insert(item, at: pinnedCount)
             
-            // Limit unpinned items? Or total items? 
-            // Let's limit total to 50 for now
-            if self.items.count > 50 {
-                self.items.removeLast()
-            }
+            self.trimUnpinnedItemsToLimit()
         }
     }
     
@@ -137,6 +152,8 @@ class ClipboardManager: ObservableObject {
             // let unpinned = items.filter { !$0.isPinned }.sorted { $0.timestamp > $1.timestamp }
             // items = items.filter { $0.isPinned } + unpinned
         }
+        
+        trimUnpinnedItemsToLimit()
     }
     
     func clearAll() {
@@ -185,6 +202,28 @@ class ClipboardManager: ObservableObject {
             self.items = loadedItems
         } catch {
             print("Failed to load items: \(error)")
+        }
+    }
+    
+    private func persistAndApplyRetentionLimit() {
+        let clamped = Self.clampedRetentionLimit(unpinnedRetentionLimit)
+        if clamped != unpinnedRetentionLimit {
+            unpinnedRetentionLimit = clamped
+            return
+        }
+        
+        UserDefaults.standard.set(clamped, forKey: Self.retentionLimitKey)
+        trimUnpinnedItemsToLimit()
+    }
+    
+    private func trimUnpinnedItemsToLimit() {
+        var unpinnedToRemove = items.filter { !$0.isPinned }.count - unpinnedRetentionLimit
+        guard unpinnedToRemove > 0 else { return }
+        
+        for index in items.indices.reversed() where unpinnedToRemove > 0 {
+            guard !items[index].isPinned else { continue }
+            items.remove(at: index)
+            unpinnedToRemove -= 1
         }
     }
 }
