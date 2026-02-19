@@ -10,6 +10,7 @@
     *   **Images:** Displays high-quality thumbnails.
 *   **Drag & Drop:** Drag items directly from the menu bar list into other apps (Finder, Mail, Messages, etc.).
 *   **Pinning:** Pin important items to the top of the list so they're always accessible. 📌
+*   **Semantic Recall Search:** Find old clipboard text by meaning, not just exact words, with local on-device ranking.
 *   **Configurable Retention:** Set how many unpinned items to keep; pinned items are never evicted by the history limit.
 *   **Persistence:** Your history and pinned items are saved across app restarts.
 *   **Management:** Delete individual items or clear the entire history with a single click.
@@ -51,6 +52,7 @@ xattr -cr /path/to/QuickTray.app
 4.  **Drag** an item out to paste it, or use the **Copy** button to put it back on your clipboard.
 5.  **Pin** items you use frequently.
 6.  Use **Keep X unpinned** in the header to control FIFO retention for unpinned history.
+7.  Use the **search bar** to find older copied text semantically (for example, related phrases with different wording).
 
 ## Development 🛠️
 

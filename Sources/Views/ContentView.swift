@@ -6,72 +6,95 @@ struct ContentView: View {
     @State private var hoveredItemId: UUID?
     @State private var showClearConfirmation = false
     
+    private var hasActiveSearch: Bool {
+        !clipboardManager.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
-                Text("QuickTray")
-                    .font(.headline)
-                    .foregroundColor(.primary)
-                Spacer()
-                
-                Stepper(value: $clipboardManager.unpinnedRetentionLimit, in: 1...500) {
-                    Text("Keep \(clipboardManager.unpinnedRetentionLimit) unpinned")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .controlSize(.small)
-                .help("Set how many unpinned items to retain")
-                
-                if showClearConfirmation {
-                    HStack(spacing: 8) {
-                        Text("Sure?")
+            VStack(spacing: 10) {
+                HStack {
+                    Text("QuickTray")
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                    Spacer()
+                    
+                    Stepper(value: $clipboardManager.unpinnedRetentionLimit, in: 1...500) {
+                        Text("Keep \(clipboardManager.unpinnedRetentionLimit)")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        
-                        Button("Yes") {
-                            clipboardManager.clearAll()
-                            showClearConfirmation = false
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red)
-                        .controlSize(.small)
-                        
-                        Button("No") {
-                            showClearConfirmation = false
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
                     }
-                } else {
-                    Button("Delete All") {
-                        showClearConfirmation = true
+                    .controlSize(.small)
+                    .help("Set how many unpinned items to retain")
+                    
+                    if showClearConfirmation {
+                        HStack(spacing: 8) {
+                            Text("Sure?")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            
+                            Button("Yes") {
+                                clipboardManager.clearAll()
+                                showClearConfirmation = false
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.red)
+                            .controlSize(.small)
+                            
+                            Button("No") {
+                                showClearConfirmation = false
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    } else {
+                        Button("Delete All") {
+                            showClearConfirmation = true
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                        .help("Clear All History")
+                        .padding(.horizontal, 4)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundColor(.secondary)
-                    .help("Clear All History")
-                    .padding(.horizontal, 4)
+                    
+                    Button("Quit") {
+                        NSApplication.shared.terminate(nil)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    
+                    TextField("Search history", text: $clipboardManager.searchQuery)
+                        .textFieldStyle(.roundedBorder)
+                    
+                    if hasActiveSearch {
+                        Button("Clear") {
+                            clipboardManager.searchQuery = ""
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                        .help("Clear search")
+                    }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
             }
             .padding()
             .background(Color(NSColor.windowBackgroundColor))
             
             Divider()
             
-            if clipboardManager.items.isEmpty {
+            if clipboardManager.displayedItems.isEmpty {
                 VStack {
                     Spacer()
                     Image(systemName: "doc.on.clipboard")
                         .font(.system(size: 40))
                         .foregroundColor(.secondary)
                         .padding(.bottom, 8)
-                    Text("Clipboard is empty")
+                    Text(hasActiveSearch ? "No matching clipboard items" : "Clipboard is empty")
                         .foregroundColor(.secondary)
                     Spacer()
                 }
@@ -79,7 +102,7 @@ struct ContentView: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(clipboardManager.items) { item in
+                        ForEach(clipboardManager.displayedItems) { item in
                             HistoryRow(item: item, 
                                        onDelete: { clipboardManager.removeItem(id: item.id) },
                                        onCopy: { clipboardManager.copyToClipboard(item: item) },

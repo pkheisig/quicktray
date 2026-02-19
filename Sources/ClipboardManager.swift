@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import NaturalLanguage
 
 enum ClipboardType: String, Codable {
     case text
@@ -47,6 +48,141 @@ struct ClipboardItem: Identifiable, Hashable, Codable {
     }
 }
 
+private final class SemanticSearchIndex {
+    private struct EmbeddingEntry {
+        let fingerprint: Int
+        let vector: [Double]?
+    }
+    
+    private var embeddingCache: [UUID: EmbeddingEntry] = [:]
+    
+    func rankedItems(from items: [ClipboardItem], query rawQuery: String) -> [ClipboardItem] {
+        let query = normalize(rawQuery)
+        guard !query.isEmpty else {
+            return items
+        }
+        
+        let textItems = items.filter { $0.type == .text && !normalize($0.textContent ?? "").isEmpty }
+        guard !textItems.isEmpty else {
+            return []
+        }
+        
+        pruneCache(validIDs: Set(textItems.map(\.id)))
+        let queryVector = embeddingVector(for: query, itemID: nil)
+        
+        let scored = textItems.compactMap { item -> (ClipboardItem, Double)? in
+            guard let text = item.textContent else { return nil }
+            
+            let normalizedText = normalize(text)
+            guard !normalizedText.isEmpty else { return nil }
+            
+            let lexical = lexicalScore(query: query, text: normalizedText)
+            let semantic = semanticScore(queryVector: queryVector, text: normalizedText, itemID: item.id)
+            let score = combinedScore(lexical: lexical, semantic: semantic)
+            
+            guard score >= 0.17 else { return nil }
+            return (item, score)
+        }
+        
+        return scored
+            .sorted {
+                if abs($0.1 - $1.1) > 0.001 {
+                    return $0.1 > $1.1
+                }
+                return $0.0.timestamp > $1.0.timestamp
+            }
+            .map(\.0)
+    }
+    
+    private func pruneCache(validIDs: Set<UUID>) {
+        embeddingCache = embeddingCache.filter { validIDs.contains($0.key) }
+    }
+    
+    private func combinedScore(lexical: Double, semantic: Double) -> Double {
+        if lexical >= 0.95 {
+            return lexical
+        }
+        return max(lexical, (semantic * 0.75) + (lexical * 0.25))
+    }
+    
+    private func semanticScore(queryVector: [Double]?, text: String, itemID: UUID) -> Double {
+        guard let queryVector else { return 0 }
+        guard let textVector = embeddingVector(for: text, itemID: itemID) else { return 0 }
+        return max(0, cosineSimilarity(queryVector, textVector))
+    }
+    
+    private func embeddingVector(for text: String, itemID: UUID?) -> [Double]? {
+        let input = embeddingInput(text)
+        let fingerprint = input.hashValue
+        
+        if let itemID, let cached = embeddingCache[itemID], cached.fingerprint == fingerprint {
+            return cached.vector
+        }
+        
+        let language = NLLanguageRecognizer.dominantLanguage(for: input) ?? .english
+        let embedding = NLEmbedding.sentenceEmbedding(for: language) ?? NLEmbedding.sentenceEmbedding(for: .english)
+        let vector = embedding?.vector(for: input)
+        
+        if let itemID {
+            embeddingCache[itemID] = EmbeddingEntry(fingerprint: fingerprint, vector: vector)
+        }
+        
+        return vector
+    }
+    
+    private func lexicalScore(query: String, text: String) -> Double {
+        if text.contains(query) {
+            return 1.0
+        }
+        
+        let queryTokens = tokenSet(from: query)
+        let textTokens = tokenSet(from: text)
+        guard !queryTokens.isEmpty, !textTokens.isEmpty else { return 0 }
+        
+        let overlap = queryTokens.intersection(textTokens).count
+        guard overlap > 0 else { return 0 }
+        
+        let coverage = Double(overlap) / Double(queryTokens.count)
+        return min(coverage, 0.95)
+    }
+    
+    private func tokenSet(from text: String) -> Set<String> {
+        let tokens = text
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 2 }
+        return Set(tokens)
+    }
+    
+    private func normalize(_ text: String) -> String {
+        text
+            .lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    private func embeddingInput(_ text: String) -> String {
+        String(normalize(text).prefix(1024))
+    }
+    
+    private func cosineSimilarity(_ lhs: [Double], _ rhs: [Double]) -> Double {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return 0 }
+        
+        var dot = 0.0
+        var lhsNorm = 0.0
+        var rhsNorm = 0.0
+        
+        for index in lhs.indices {
+            dot += lhs[index] * rhs[index]
+            lhsNorm += lhs[index] * lhs[index]
+            rhsNorm += rhs[index] * rhs[index]
+        }
+        
+        guard lhsNorm > 0, rhsNorm > 0 else { return 0 }
+        return dot / (sqrt(lhsNorm) * sqrt(rhsNorm))
+    }
+}
+
 class ClipboardManager: ObservableObject {
     private static let retentionLimitKey = "unpinnedRetentionLimit"
     private static let defaultUnpinnedRetentionLimit = 20
@@ -62,11 +198,24 @@ class ClipboardManager: ObservableObject {
     @Published var items: [ClipboardItem] = [] {
         didSet {
             saveItems()
+            refreshDisplayedItems()
         }
     }
+    
+    @Published var searchQuery: String = "" {
+        didSet {
+            refreshDisplayedItems()
+        }
+    }
+    
+    @Published private(set) var displayedItems: [ClipboardItem] = []
+    
     private var timer: Timer?
     private let pasteboard = NSPasteboard.general
     private var lastChangeCount: Int
+    private let searchQueue = DispatchQueue(label: "com.gemini.quicktray.semantic-search", qos: .userInitiated)
+    private var activeSearchID = UUID()
+    private let semanticSearchIndex = SemanticSearchIndex()
     
     private static func clampedRetentionLimit(_ value: Int) -> Int {
         min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
@@ -89,6 +238,7 @@ class ClipboardManager: ObservableObject {
         self.lastChangeCount = pasteboard.changeCount
         loadItems()
         trimUnpinnedItemsToLimit()
+        refreshDisplayedItems()
         startMonitoring()
     }
     
@@ -224,6 +374,23 @@ class ClipboardManager: ObservableObject {
             guard !items[index].isPinned else { continue }
             items.remove(at: index)
             unpinnedToRemove -= 1
+        }
+    }
+    
+    private func refreshDisplayedItems() {
+        let querySnapshot = searchQuery
+        let itemsSnapshot = items
+        let searchID = UUID()
+        activeSearchID = searchID
+        
+        searchQueue.async { [weak self] in
+            guard let self else { return }
+            let rankedItems = self.semanticSearchIndex.rankedItems(from: itemsSnapshot, query: querySnapshot)
+            
+            DispatchQueue.main.async {
+                guard self.activeSearchID == searchID else { return }
+                self.displayedItems = rankedItems
+            }
         }
     }
 }
