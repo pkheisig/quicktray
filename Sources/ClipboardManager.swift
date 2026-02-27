@@ -8,17 +8,21 @@ enum ClipboardType: String, Codable {
     case image
 }
 
-struct ClipboardItem: Identifiable, Hashable, Codable {
+class ClipboardItem: Identifiable, Hashable, Codable {
     let id: UUID
     let type: ClipboardType
     let textContent: String?
     let imageData: Data?
-    let timestamp: Date
+    var timestamp: Date
     var isPinned: Bool = false
     
+    private var _cachedImage: NSImage?
     var imageContent: NSImage? {
+        if type != .image { return nil }
+        if let cached = _cachedImage { return cached }
         guard let data = imageData else { return nil }
-        return NSImage(data: data)
+        _cachedImage = NSImage(data: data)
+        return _cachedImage
     }
     
     init(text: String) {
@@ -35,16 +39,48 @@ struct ClipboardItem: Identifiable, Hashable, Codable {
         self.textContent = nil
         self.imageData = image.tiffRepresentation
         self.timestamp = Date()
+        self._cachedImage = image
     }
     
     // Hashable conformance
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
-        hasher.combine(isPinned) // Update hash if pin state changes
+        hasher.combine(isPinned)
+        hasher.combine(timestamp)
     }
     
     static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool {
-        lhs.id == rhs.id && lhs.isPinned == rhs.isPinned
+        lhs.id == rhs.id && lhs.isPinned == rhs.isPinned && lhs.timestamp == rhs.timestamp
+    }
+
+    // Codable support for the class
+    enum CodingKeys: String, CodingKey {
+        case id, type, textContent, imageData, timestamp, isPinned
+    }
+
+    required init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        type = try container.decode(ClipboardType.self, forKey: .type)
+        textContent = try container.decodeIfPresent(String.self, forKey: .textContent)
+        imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        isPinned = try container.decode(Bool.self, forKey: .isPinned)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(type, forKey: .type)
+        try container.encode(textContent, forKey: .textContent)
+        try container.encode(imageData, forKey: .imageData)
+        try container.encode(timestamp, forKey: .timestamp)
+        try container.encode(isPinned, forKey: .isPinned)
+    }
+
+    func snapshot() -> ClipboardItem {
+        // This is a bit hacky but safe for transfer
+        return try! JSONDecoder().decode(ClipboardItem.self, from: JSONEncoder().encode(self))
     }
 }
 
@@ -252,25 +288,32 @@ class ClipboardManager: ObservableObject {
         guard pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
         
-        // Prioritize images
         if let image = NSImage(pasteboard: pasteboard) {
             addItem(ClipboardItem(image: image))
         } else if let str = pasteboard.string(forType: .string) {
-            // Avoid adding duplicates of the immediate last item
-            if let last = items.first(where: { !$0.isPinned }), last.type == .text, last.textContent == str {
-                return // Duplicate of recent unpinned item
-            }
-            // Check pinned items too? Maybe not, allow re-copying to bring to top?
-            // For now simple logic: just add it.
             addItem(ClipboardItem(text: str))
         }
     }
     
     func addItem(_ item: ClipboardItem) {
         DispatchQueue.main.async {
-            // Insert after the last pinned item
-            let pinnedCount = self.items.filter { $0.isPinned }.count
-            self.items.insert(item, at: pinnedCount)
+            // Check if item with same content already exists
+            if let existingIndex = self.items.firstIndex(where: { 
+                if $0.type != item.type { return false }
+                if item.type == .text {
+                    return $0.textContent == item.textContent
+                } else {
+                    return $0.imageData == item.imageData
+                }
+            }) {
+                // Move existing item to top and update its timestamp
+                let existingItem = self.items.remove(at: existingIndex)
+                existingItem.timestamp = Date()
+                self.items.insert(existingItem, at: 0)
+            } else {
+                // Insert new item at the absolute top
+                self.items.insert(item, at: 0)
+            }
             
             self.trimUnpinnedItemsToLimit()
         }
@@ -279,37 +322,19 @@ class ClipboardManager: ObservableObject {
     func togglePin(for id: UUID) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         
-        var item = items[index]
+        let item = items[index]
         item.isPinned.toggle()
         
         items.remove(at: index)
         
-        if item.isPinned {
-            // Move to top (or bottom of pinned list)
-            // Let's say newest pinned stays at top? Or oldest pinned?
-            // Usually user wants recently pinned at top.
-            items.insert(item, at: 0)
-        } else {
-            // Move to unpinned section, sorted by date
-            // Find insertion point based on timestamp
-            let pinnedCount = items.filter { $0.isPinned }.count
-            // Simple approach: Insert at top of unpinned
-            items.insert(item, at: pinnedCount)
-            
-            // Ideally we re-sort the whole unpinned section by date, but since we add new items to top, 
-            // the order should be roughly preserved. 
-            // To be strict: 
-            // let unpinned = items.filter { !$0.isPinned }.sorted { $0.timestamp > $1.timestamp }
-            // items = items.filter { $0.isPinned } + unpinned
-        }
+        // When pinning/unpinning, we still move it to the top because it's an "active" interaction
+        items.insert(item, at: 0)
         
         trimUnpinnedItemsToLimit()
     }
     
     func clearAll() {
         DispatchQueue.main.async {
-            // Maybe keep pinned items?
-            // "Delete All" usually means all.
             self.items.removeAll()
         }
     }
@@ -328,15 +353,20 @@ class ClipboardManager: ObservableObject {
             pasteboard.writeObjects([image])
         }
         lastChangeCount = pasteboard.changeCount
+        
+        // Move to top when copied from history
+        addItem(item)
     }
     
     // MARK: - Persistence
     
     private func saveItems() {
         guard let url = persistenceURL else { return }
+        // Create a thread-safe snapshot by encoding existing data
+        let itemsSnapshot = self.items.map { $0.snapshot() }
         DispatchQueue.global(qos: .background).async {
             do {
-                let data = try JSONEncoder().encode(self.items)
+                let data = try JSONEncoder().encode(itemsSnapshot)
                 try data.write(to: url)
             } catch {
                 print("Failed to save items: \(error)")
@@ -378,8 +408,15 @@ class ClipboardManager: ObservableObject {
     }
     
     private func refreshDisplayedItems() {
-        let querySnapshot = searchQuery
+        let querySnapshot = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let itemsSnapshot = items
+        
+        // If query is empty, update immediately on main thread to ensure UI is in sync
+        if querySnapshot.isEmpty {
+            self.displayedItems = itemsSnapshot
+            return
+        }
+        
         let searchID = UUID()
         activeSearchID = searchID
         

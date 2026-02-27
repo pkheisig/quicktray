@@ -100,21 +100,35 @@ struct ContentView: View {
                 }
                 .frame(minHeight: 200)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(clipboardManager.displayedItems) { item in
-                            HistoryRow(item: item, 
-                                       onDelete: { clipboardManager.removeItem(id: item.id) },
-                                       onCopy: { clipboardManager.copyToClipboard(item: item) },
-                                       onPin: { clipboardManager.togglePin(for: item.id) }
-                            )
-                            .onHover { isHovering in
-                                hoveredItemId = isHovering ? item.id : nil
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            // Anchor for scrolling to top
+                            Color.clear
+                                .frame(height: 1)
+                                .id("top")
+                            
+                            ForEach(clipboardManager.displayedItems) { item in
+                                HistoryRow(item: item, 
+                                           onDelete: { clipboardManager.removeItem(id: item.id) },
+                                           onCopy: { clipboardManager.copyToClipboard(item: item) },
+                                           onPin: { clipboardManager.togglePin(for: item.id) }
+                                )
+                                Divider()
                             }
-                            .background(hoveredItemId == item.id ? Color.blue.opacity(0.1) : Color.clear)
-                            .background(item.isPinned ? Color.yellow.opacity(0.05) : Color.clear) // Subtle highlight for pinned
-                            Divider()
                         }
+                    }
+                    .onChange(of: clipboardManager.displayedItems.count) { _ in
+                        // Only auto-scroll if we are not searching
+                        if !hasActiveSearch {
+                            withAnimation {
+                                proxy.scrollTo("top", anchor: .top)
+                            }
+                        }
+                    }
+                    .onAppear {
+                        // Ensure we open at the top
+                        proxy.scrollTo("top", anchor: .top)
                     }
                 }
                 .frame(maxHeight: 500)
@@ -133,6 +147,7 @@ struct HistoryRow: View {
     
     @State private var showDetail = false
     @State private var showCopiedFeedback = false
+    @State private var isHovered = false
     
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -230,6 +245,11 @@ struct HistoryRow: View {
             .padding(.top, 4)
         }
         .padding(10)
+        .background(isHovered ? Color.blue.opacity(0.1) : Color.clear)
+        .background(item.isPinned ? Color.yellow.opacity(0.05) : Color.clear)
+        .onHover { hovering in
+            isHovered = hovering
+        }
         .contentShape(Rectangle())
         // Drag and Drop
         .onDrag {
