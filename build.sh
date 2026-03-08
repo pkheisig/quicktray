@@ -4,7 +4,7 @@ set -e
 APP_NAME="QuickTray"
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
-SOURCES="Sources/QuickTrayApp.swift Sources/ClipboardManager.swift Sources/Views/ContentView.swift"
+SOURCES=$(find Sources -name '*.swift' | sort)
 OUT_X86="$BUILD_DIR/$APP_NAME-x86_64"
 OUT_ARM="$BUILD_DIR/$APP_NAME-arm64"
 

@@ -1,433 +1,779 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
-import NaturalLanguage
+import QuickLookThumbnailing
+import Carbon.HIToolbox
 
-enum ClipboardType: String, Codable {
+enum ClipboardKind: String, Codable {
     case text
     case image
+    case file
 }
 
-class ClipboardItem: Identifiable, Hashable, Codable {
-    let id: UUID
-    let type: ClipboardType
-    let textContent: String?
-    let imageData: Data?
-    var timestamp: Date
-    var isPinned: Bool = false
-    
-    private var _cachedImage: NSImage?
-    var imageContent: NSImage? {
-        if type != .image { return nil }
-        if let cached = _cachedImage { return cached }
-        guard let data = imageData else { return nil }
-        _cachedImage = NSImage(data: data)
-        return _cachedImage
-    }
-    
-    init(text: String) {
-        self.id = UUID()
-        self.type = .text
-        self.textContent = text
-        self.imageData = nil
-        self.timestamp = Date()
-    }
-    
-    init(image: NSImage) {
-        self.id = UUID()
-        self.type = .image
-        self.textContent = nil
-        self.imageData = image.tiffRepresentation
-        self.timestamp = Date()
-        self._cachedImage = image
-    }
-    
-    // Hashable conformance
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(isPinned)
-        hasher.combine(timestamp)
-    }
-    
-    static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool {
-        lhs.id == rhs.id && lhs.isPinned == rhs.isPinned && lhs.timestamp == rhs.timestamp
+enum ClipboardCategory: String, CaseIterable, Identifiable {
+    case mixed
+    case text
+    case images
+    case video
+    case documents
+    case files
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .mixed: return "Mixed"
+        case .text: return "Text"
+        case .images: return "Images"
+        case .video: return "Video"
+        case .documents: return "Docs"
+        case .files: return "Files"
+        }
     }
 
-    // Codable support for the class
+    var symbolName: String {
+        switch self {
+        case .mixed: return "square.stack.3d.up.fill"
+        case .text: return "text.alignleft"
+        case .images: return "photo.fill"
+        case .video: return "film.stack.fill"
+        case .documents: return "doc.text.fill"
+        case .files: return "folder.fill"
+        }
+    }
+}
+
+enum ClipboardDisplayMode: String, CaseIterable, Identifiable {
+    case list
+    case tiles
+
+    var id: String { rawValue }
+
+    var symbolName: String {
+        switch self {
+        case .list: return "list.bullet.rectangle.portrait"
+        case .tiles: return "square.grid.2x2.fill"
+        }
+    }
+}
+
+final class ClipboardItem: Identifiable, Hashable, Codable {
+    let id: UUID
+    let kind: ClipboardKind
+    var textContent: String?
+    var imageData: Data?
+    var filePath: String?
+    var timestamp: Date
+    var isPinned: Bool
+
+    private var cachedImage: NSImage?
+    private var cachedContentType: UTType?
+
+    var fileURL: URL? {
+        guard let filePath else { return nil }
+        return URL(fileURLWithPath: filePath)
+    }
+
+    var imageContent: NSImage? {
+        guard kind == .image else { return nil }
+        if let cachedImage {
+            return cachedImage
+        }
+        guard let imageData else { return nil }
+        let image = NSImage(data: imageData)
+        cachedImage = image
+        return image
+    }
+
+    var contentType: UTType? {
+        if let cachedContentType {
+            return cachedContentType
+        }
+
+        guard let fileURL else { return nil }
+        if let resourceValues = try? fileURL.resourceValues(forKeys: [.contentTypeKey]),
+           let detectedType = resourceValues.contentType {
+            cachedContentType = detectedType
+            return detectedType
+        }
+
+        let fallbackType = UTType(filenameExtension: fileURL.pathExtension)
+        cachedContentType = fallbackType
+        return fallbackType
+    }
+
+    var title: String {
+        switch kind {
+        case .text:
+            let firstLine = textContent?
+                .split(whereSeparator: \.isNewline)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return firstLine.isEmpty ? "Untitled text clip" : String(firstLine.prefix(120))
+        case .image:
+            return "Image clip"
+        case .file:
+            return fileURL?.lastPathComponent ?? "Missing file"
+        }
+    }
+
+    var detailText: String {
+        switch kind {
+        case .text:
+            let trimmed = textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if trimmed.isEmpty {
+                return "Empty text item"
+            }
+            return String(trimmed.prefix(220))
+        case .image:
+            let width = Int(imageContent?.size.width ?? 0)
+            let height = Int(imageContent?.size.height ?? 0)
+            return "\(width) × \(height)"
+        case .file:
+            if let fileURL {
+                return fileURL.path
+            }
+            return "Original file is unavailable"
+        }
+    }
+
+    var primaryCategory: ClipboardCategory {
+        switch kind {
+        case .text:
+            return .text
+        case .image:
+            return .images
+        case .file:
+            guard let type = contentType else { return .files }
+            if type.conforms(to: UTType.movie) || type.conforms(to: UTType.audiovisualContent) {
+                return .video
+            }
+            if type.conforms(to: UTType.image) {
+                return .images
+            }
+            let isDocument = type.conforms(to: UTType.text)
+                || type.conforms(to: UTType.pdf)
+                || type.conforms(to: UTType.content)
+                || type.identifier.contains("spreadsheet")
+                || type.identifier.contains("presentation")
+                || type.identifier.contains("wordprocessing")
+                || type.identifier.contains("office")
+            if isDocument {
+                return .documents
+            }
+            return .files
+        }
+    }
+
+    var fileTypeToken: String {
+        switch kind {
+        case .text:
+            return "text"
+        case .image:
+            return "image"
+        case .file:
+            if let fileURL, fileURL.hasDirectoryPath {
+                return "folder"
+            }
+            let ext = fileURL?.pathExtension.lowercased() ?? ""
+            if !ext.isEmpty {
+                return ext
+            }
+            if let type = contentType?.preferredFilenameExtension {
+                return type.lowercased()
+            }
+            return "file"
+        }
+    }
+
+    var searchableText: String {
+        switch kind {
+        case .text:
+            return [title, textContent ?? ""].joined(separator: " ")
+        case .image:
+            return [title, detailText, fileTypeToken].joined(separator: " ")
+        case .file:
+            let localizedDescription = contentType?.localizedDescription ?? ""
+            return [title, detailText, fileTypeToken, localizedDescription].joined(separator: " ")
+        }
+    }
+
+    var canEdit: Bool {
+        kind == .text
+    }
+
     enum CodingKeys: String, CodingKey {
-        case id, type, textContent, imageData, timestamp, isPinned
+        case id
+        case kind
+        case textContent
+        case imageData
+        case filePath
+        case timestamp
+        case isPinned
+    }
+
+    init(text: String) {
+        id = UUID()
+        kind = .text
+        textContent = text
+        imageData = nil
+        filePath = nil
+        timestamp = Date()
+        isPinned = false
     }
 
     required init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
-        type = try container.decode(ClipboardType.self, forKey: .type)
+        kind = try container.decode(ClipboardKind.self, forKey: .kind)
         textContent = try container.decodeIfPresent(String.self, forKey: .textContent)
         imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
+        filePath = try container.decodeIfPresent(String.self, forKey: .filePath)
         timestamp = try container.decode(Date.self, forKey: .timestamp)
         isPinned = try container.decode(Bool.self, forKey: .isPinned)
+        cachedImage = nil
+        cachedContentType = nil
     }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
-        try container.encode(type, forKey: .type)
-        try container.encode(textContent, forKey: .textContent)
-        try container.encode(imageData, forKey: .imageData)
+        try container.encode(kind, forKey: .kind)
+        try container.encodeIfPresent(textContent, forKey: .textContent)
+        try container.encodeIfPresent(imageData, forKey: .imageData)
+        try container.encodeIfPresent(filePath, forKey: .filePath)
         try container.encode(timestamp, forKey: .timestamp)
         try container.encode(isPinned, forKey: .isPinned)
     }
 
+    init(image: NSImage) {
+        id = UUID()
+        kind = .image
+        textContent = nil
+        imageData = image.tiffRepresentation
+        filePath = nil
+        timestamp = Date()
+        isPinned = false
+        cachedImage = image
+    }
+
+    init(fileURL: URL) {
+        id = UUID()
+        kind = .file
+        textContent = nil
+        imageData = nil
+        filePath = fileURL.path
+        timestamp = Date()
+        isPinned = false
+    }
+
+    func dragItemProvider() -> NSItemProvider? {
+        switch kind {
+        case .text:
+            guard let textContent else { return nil }
+            return NSItemProvider(object: textContent as NSString)
+        case .image:
+            guard let imageContent else { return nil }
+            return NSItemProvider(object: imageContent)
+        case .file:
+            guard let fileURL else { return nil }
+            return NSItemProvider(contentsOf: fileURL)
+        }
+    }
+
+    func matchesSamePayload(as other: ClipboardItem) -> Bool {
+        guard kind == other.kind else { return false }
+
+        switch kind {
+        case .text:
+            return textContent == other.textContent
+        case .image:
+            return imageData == other.imageData
+        case .file:
+            return filePath == other.filePath
+        }
+    }
+
     func snapshot() -> ClipboardItem {
-        // This is a bit hacky but safe for transfer
-        return try! JSONDecoder().decode(ClipboardItem.self, from: JSONEncoder().encode(self))
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        return try! decoder.decode(ClipboardItem.self, from: encoder.encode(self))
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+
+    static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool {
+        lhs.id == rhs.id
     }
 }
 
-private final class SemanticSearchIndex {
-    private struct EmbeddingEntry {
-        let fingerprint: Int
-        let vector: [Double]?
-    }
-    
-    private var embeddingCache: [UUID: EmbeddingEntry] = [:]
-    
-    func rankedItems(from items: [ClipboardItem], query rawQuery: String) -> [ClipboardItem] {
-        let query = normalize(rawQuery)
-        guard !query.isEmpty else {
-            return items
+private enum PreviewFactory {
+    static func previewImage(for item: ClipboardItem) -> NSImage? {
+        guard let fileURL = item.fileURL else { return nil }
+
+        if let quickLookImage = quickLookThumbnail(for: fileURL) {
+            quickLookImage.size = NSSize(width: 320, height: 200)
+            return quickLookImage
         }
-        
-        let textItems = items.filter { $0.type == .text && !normalize($0.textContent ?? "").isEmpty }
-        guard !textItems.isEmpty else {
-            return []
+
+        return fallbackApplicationIcon(for: fileURL)
+    }
+
+    private static func quickLookThumbnail(for fileURL: URL) -> NSImage? {
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let request = QLThumbnailGenerator.Request(
+            fileAt: fileURL,
+            size: CGSize(width: 560, height: 420),
+            scale: scale,
+            representationTypes: .all
+        )
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var resultImage: NSImage?
+
+        QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
+            defer { semaphore.signal() }
+            guard let cgImage = representation?.cgImage else { return }
+            resultImage = NSImage(
+                cgImage: cgImage,
+                size: NSSize(width: cgImage.width, height: cgImage.height)
+            )
         }
-        
-        pruneCache(validIDs: Set(textItems.map(\.id)))
-        let queryVector = embeddingVector(for: query, itemID: nil)
-        
-        let scored = textItems.compactMap { item -> (ClipboardItem, Double)? in
-            guard let text = item.textContent else { return nil }
-            
-            let normalizedText = normalize(text)
-            guard !normalizedText.isEmpty else { return nil }
-            
-            let lexical = lexicalScore(query: query, text: normalizedText)
-            let semantic = semanticScore(queryVector: queryVector, text: normalizedText, itemID: item.id)
-            let score = combinedScore(lexical: lexical, semantic: semantic)
-            
-            guard score >= 0.17 else { return nil }
-            return (item, score)
+
+        semaphore.wait()
+        return resultImage
+    }
+
+    private static func fallbackApplicationIcon(for fileURL: URL) -> NSImage? {
+        if let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: fileURL) {
+            let icon = NSWorkspace.shared.icon(forFile: applicationURL.path)
+            icon.size = NSSize(width: 128, height: 128)
+            return icon
         }
-        
-        return scored
-            .sorted {
-                if abs($0.1 - $1.1) > 0.001 {
-                    return $0.1 > $1.1
-                }
-                return $0.0.timestamp > $1.0.timestamp
-            }
-            .map(\.0)
-    }
-    
-    private func pruneCache(validIDs: Set<UUID>) {
-        embeddingCache = embeddingCache.filter { validIDs.contains($0.key) }
-    }
-    
-    private func combinedScore(lexical: Double, semantic: Double) -> Double {
-        if lexical >= 0.95 {
-            return lexical
-        }
-        return max(lexical, (semantic * 0.75) + (lexical * 0.25))
-    }
-    
-    private func semanticScore(queryVector: [Double]?, text: String, itemID: UUID) -> Double {
-        guard let queryVector else { return 0 }
-        guard let textVector = embeddingVector(for: text, itemID: itemID) else { return 0 }
-        return max(0, cosineSimilarity(queryVector, textVector))
-    }
-    
-    private func embeddingVector(for text: String, itemID: UUID?) -> [Double]? {
-        let input = embeddingInput(text)
-        let fingerprint = input.hashValue
-        
-        if let itemID, let cached = embeddingCache[itemID], cached.fingerprint == fingerprint {
-            return cached.vector
-        }
-        
-        let language = NLLanguageRecognizer.dominantLanguage(for: input) ?? .english
-        let embedding = NLEmbedding.sentenceEmbedding(for: language) ?? NLEmbedding.sentenceEmbedding(for: .english)
-        let vector = embedding?.vector(for: input)
-        
-        if let itemID {
-            embeddingCache[itemID] = EmbeddingEntry(fingerprint: fingerprint, vector: vector)
-        }
-        
-        return vector
-    }
-    
-    private func lexicalScore(query: String, text: String) -> Double {
-        if text.contains(query) {
-            return 1.0
-        }
-        
-        let queryTokens = tokenSet(from: query)
-        let textTokens = tokenSet(from: text)
-        guard !queryTokens.isEmpty, !textTokens.isEmpty else { return 0 }
-        
-        let overlap = queryTokens.intersection(textTokens).count
-        guard overlap > 0 else { return 0 }
-        
-        let coverage = Double(overlap) / Double(queryTokens.count)
-        return min(coverage, 0.95)
-    }
-    
-    private func tokenSet(from text: String) -> Set<String> {
-        let tokens = text
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { $0.count >= 2 }
-        return Set(tokens)
-    }
-    
-    private func normalize(_ text: String) -> String {
-        text
-            .lowercased()
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    
-    private func embeddingInput(_ text: String) -> String {
-        String(normalize(text).prefix(1024))
-    }
-    
-    private func cosineSimilarity(_ lhs: [Double], _ rhs: [Double]) -> Double {
-        guard lhs.count == rhs.count, !lhs.isEmpty else { return 0 }
-        
-        var dot = 0.0
-        var lhsNorm = 0.0
-        var rhsNorm = 0.0
-        
-        for index in lhs.indices {
-            dot += lhs[index] * rhs[index]
-            lhsNorm += lhs[index] * lhs[index]
-            rhsNorm += rhs[index] * rhs[index]
-        }
-        
-        guard lhsNorm > 0, rhsNorm > 0 else { return 0 }
-        return dot / (sqrt(lhsNorm) * sqrt(rhsNorm))
+
+        let icon = NSWorkspace.shared.icon(forFile: fileURL.path)
+        icon.size = NSSize(width: 128, height: 128)
+        return icon
     }
 }
 
-class ClipboardManager: ObservableObject {
+final class ClipboardManager: ObservableObject {
+    static let shared = ClipboardManager()
+
     private static let retentionLimitKey = "unpinnedRetentionLimit"
-    private static let defaultUnpinnedRetentionLimit = 20
+    private static let monitoringEnabledKey = "clipboardMonitoringEnabled"
+    private static let defaultUnpinnedRetentionLimit = 30
     private static let minUnpinnedRetentionLimit = 1
     private static let maxUnpinnedRetentionLimit = 500
-    
+
     @Published var unpinnedRetentionLimit: Int {
         didSet {
             persistAndApplyRetentionLimit()
         }
     }
-    
+
     @Published var items: [ClipboardItem] = [] {
         didSet {
             saveItems()
             refreshDisplayedItems()
         }
     }
-    
-    @Published var searchQuery: String = "" {
+
+    @Published var searchQuery = "" {
         didSet {
             refreshDisplayedItems()
         }
     }
-    
-    @Published private(set) var displayedItems: [ClipboardItem] = []
-    
-    private var timer: Timer?
-    private let pasteboard = NSPasteboard.general
-    private var lastChangeCount: Int
-    private let searchQueue = DispatchQueue(label: "com.gemini.quicktray.semantic-search", qos: .userInitiated)
-    private var activeSearchID = UUID()
-    private let semanticSearchIndex = SemanticSearchIndex()
-    
-    private static func clampedRetentionLimit(_ value: Int) -> Int {
-        min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
-    }
-    
-    private var persistenceURL: URL? {
-        guard let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
-        let appDir = supportDir.appendingPathComponent("com.gemini.QuickTray")
-        
-        // Ensure dir exists
-        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-        
-        return appDir.appendingPathComponent("items.json")
-    }
-    
-    init() {
-        let savedLimit = UserDefaults.standard.integer(forKey: Self.retentionLimitKey)
-        let initialLimit = savedLimit > 0 ? savedLimit : Self.defaultUnpinnedRetentionLimit
-        self.unpinnedRetentionLimit = Self.clampedRetentionLimit(initialLimit)
-        self.lastChangeCount = pasteboard.changeCount
-        loadItems()
-        trimUnpinnedItemsToLimit()
-        refreshDisplayedItems()
-        startMonitoring()
-    }
-    
-    func startMonitoring() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.checkClipboard()
-        }
-    }
-    
-    func checkClipboard() {
-        guard pasteboard.changeCount != lastChangeCount else { return }
-        lastChangeCount = pasteboard.changeCount
-        
-        if let image = NSImage(pasteboard: pasteboard) {
-            addItem(ClipboardItem(image: image))
-        } else if let str = pasteboard.string(forType: .string) {
-            addItem(ClipboardItem(text: str))
-        }
-    }
-    
-    func addItem(_ item: ClipboardItem) {
-        DispatchQueue.main.async {
-            // Check if item with same content already exists
-            if let existingIndex = self.items.firstIndex(where: { 
-                if $0.type != item.type { return false }
-                if item.type == .text {
-                    return $0.textContent == item.textContent
-                } else {
-                    return $0.imageData == item.imageData
-                }
-            }) {
-                // Move existing item to top and update its timestamp
-                let existingItem = self.items.remove(at: existingIndex)
-                existingItem.timestamp = Date()
-                self.items.insert(existingItem, at: 0)
-            } else {
-                // Insert new item at the absolute top
-                self.items.insert(item, at: 0)
+
+    @Published var selectedCategory: ClipboardCategory = .mixed {
+        didSet {
+            if !availableFileTypeFilters.contains(fileTypeFilter) {
+                fileTypeFilter = "all"
             }
-            
-            self.trimUnpinnedItemsToLimit()
-        }
-    }
-    
-    func togglePin(for id: UUID) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        
-        let item = items[index]
-        item.isPinned.toggle()
-        
-        items.remove(at: index)
-        
-        // When pinning/unpinning, we still move it to the top because it's an "active" interaction
-        items.insert(item, at: 0)
-        
-        trimUnpinnedItemsToLimit()
-    }
-    
-    func clearAll() {
-        DispatchQueue.main.async {
-            self.items.removeAll()
-        }
-    }
-    
-    func removeItem(id: UUID) {
-        DispatchQueue.main.async {
-            self.items.removeAll { $0.id == id }
+            refreshDisplayedItems()
         }
     }
 
-    func copyToClipboard(item: ClipboardItem) {
-        pasteboard.clearContents()
-        if item.type == .text, let text = item.textContent {
-            pasteboard.setString(text, forType: .string)
-        } else if item.type == .image, let image = item.imageContent {
-            pasteboard.writeObjects([image])
+    @Published var fileTypeFilter = "all" {
+        didSet {
+            refreshDisplayedItems()
         }
-        lastChangeCount = pasteboard.changeCount
-        
-        // Move to top when copied from history
-        addItem(item)
     }
-    
-    // MARK: - Persistence
-    
-    private func saveItems() {
-        guard let url = persistenceURL else { return }
-        // Create a thread-safe snapshot by encoding existing data
-        let itemsSnapshot = self.items.map { $0.snapshot() }
-        DispatchQueue.global(qos: .background).async {
-            do {
-                let data = try JSONEncoder().encode(itemsSnapshot)
-                try data.write(to: url)
-            } catch {
-                print("Failed to save items: \(error)")
+
+    @Published var showPinnedOnly = false {
+        didSet {
+            refreshDisplayedItems()
+        }
+    }
+
+    @Published var isMonitoringEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isMonitoringEnabled, forKey: Self.monitoringEnabledKey)
+            isMonitoringEnabled ? startMonitoring() : stopMonitoring()
+        }
+    }
+
+    @Published var displayMode: ClipboardDisplayMode = .list
+    @Published private(set) var displayedItems: [ClipboardItem] = []
+    @Published private(set) var previewImages: [UUID: NSImage] = [:]
+
+    private let pasteboard = NSPasteboard.general
+    private let previewQueue = DispatchQueue(label: "com.gemini.quicktray.previews", qos: .userInitiated)
+    private var timer: Timer?
+    private var lastChangeCount: Int
+
+    private static func clampedRetentionLimit(_ value: Int) -> Int {
+        min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
+    }
+
+    private var persistenceURL: URL? {
+        guard let supportDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+
+        let appDirectory = supportDirectory.appendingPathComponent("com.gemini.QuickTray")
+        try? FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+        return appDirectory.appendingPathComponent("items.json")
+    }
+
+    private init() {
+        let savedLimit = UserDefaults.standard.integer(forKey: Self.retentionLimitKey)
+        let initialLimit = savedLimit > 0 ? savedLimit : Self.defaultUnpinnedRetentionLimit
+        unpinnedRetentionLimit = Self.clampedRetentionLimit(initialLimit)
+        isMonitoringEnabled = UserDefaults.standard.object(forKey: Self.monitoringEnabledKey) as? Bool ?? true
+        lastChangeCount = pasteboard.changeCount
+
+        loadItems()
+        trimUnpinnedItemsToLimit()
+        loadInitialPreviews()
+        refreshDisplayedItems()
+        if isMonitoringEnabled {
+            startMonitoring()
+        }
+    }
+
+    var availableFileTypeFilters: [String] {
+        let filteredItems = sortedItems().filter { item in
+            selectedCategory == .mixed || item.primaryCategory == selectedCategory
+        }
+
+        let tokens = Set(filteredItems.map(\.fileTypeToken))
+        return ["all"] + tokens.sorted()
+    }
+
+    func startMonitoring() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { [weak self] _ in
+            self?.checkClipboard()
+        }
+    }
+
+    func stopMonitoring() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func checkClipboard() {
+        guard pasteboard.changeCount != lastChangeCount else { return }
+        lastChangeCount = pasteboard.changeCount
+
+        let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL],
+           !fileURLs.isEmpty {
+            for fileURL in fileURLs.reversed() {
+                addItem(ClipboardItem(fileURL: fileURL))
+            }
+            return
+        }
+
+        if let image = NSImage(pasteboard: pasteboard) {
+            addItem(ClipboardItem(image: image))
+            return
+        }
+
+        if let string = pasteboard.string(forType: .string) {
+            addItem(ClipboardItem(text: string))
+        }
+    }
+
+    func togglePin(for id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].isPinned.toggle()
+        items = items
+    }
+
+    func clearAll() {
+        items.removeAll()
+        previewImages.removeAll()
+    }
+
+    func removeItem(id: UUID) {
+        items.removeAll { $0.id == id }
+        previewImages[id] = nil
+    }
+
+    func copyToClipboard(item: ClipboardItem, shouldPaste: Bool = false) {
+        pasteboard.clearContents()
+
+        switch item.kind {
+        case .text:
+            if let textContent = item.textContent {
+                pasteboard.setString(textContent, forType: .string)
+            }
+        case .image:
+            if let imageContent = item.imageContent {
+                pasteboard.writeObjects([imageContent])
+            }
+        case .file:
+            if let fileURL = item.fileURL {
+                pasteboard.writeObjects([fileURL as NSURL])
+            }
+        }
+
+        lastChangeCount = pasteboard.changeCount
+        addItem(item, refreshTimestamp: true)
+
+        guard shouldPaste else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+            Self.issuePasteShortcut()
+        }
+    }
+
+    func quickPasteRecent(offsetFromLatest offset: Int) {
+        let recentItems = items.sorted { $0.timestamp > $1.timestamp }
+        guard recentItems.indices.contains(offset) else { return }
+        copyToClipboard(item: recentItems[offset], shouldPaste: true)
+    }
+
+    func toggleMonitoring() {
+        isMonitoringEnabled.toggle()
+    }
+
+    func updateText(for id: UUID, newValue: String) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].textContent = newValue
+        items[index].timestamp = Date()
+        items = items
+    }
+
+    func copyPathToClipboard(item: ClipboardItem) {
+        guard let fileURL = item.fileURL else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(fileURL.path, forType: .string)
+        lastChangeCount = pasteboard.changeCount
+    }
+
+    func previewImage(for item: ClipboardItem) -> NSImage? {
+        switch item.kind {
+        case .image:
+            return item.imageContent
+        case .text:
+            return nil
+        case .file:
+            if let image = previewImages[item.id] {
+                return image
+            }
+
+            loadPreview(for: item)
+            return nil
+        }
+    }
+
+    func revealInFinder(_ item: ClipboardItem) {
+        guard let fileURL = item.fileURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+    }
+
+    func openFile(_ item: ClipboardItem) {
+        guard let fileURL = item.fileURL else { return }
+        NSWorkspace.shared.open(fileURL)
+    }
+
+    private func addItem(_ item: ClipboardItem, refreshTimestamp: Bool = false) {
+        if let existingIndex = items.firstIndex(where: { $0.matchesSamePayload(as: item) }) {
+            let existingItem = items[existingIndex]
+            if refreshTimestamp {
+                existingItem.timestamp = Date()
+            }
+            items = items
+            loadPreview(for: existingItem)
+            return
+        }
+
+        if refreshTimestamp {
+            item.timestamp = Date()
+        }
+
+        items.append(item)
+        trimUnpinnedItemsToLimit()
+        loadPreview(for: item)
+    }
+
+    private func sortedItems() -> [ClipboardItem] {
+        items.sorted {
+            if $0.isPinned != $1.isPinned {
+                return $0.isPinned && !$1.isPinned
+            }
+            return $0.timestamp > $1.timestamp
+        }
+    }
+
+    private func itemMatchesCurrentCategory(_ item: ClipboardItem) -> Bool {
+        selectedCategory == .mixed || item.primaryCategory == selectedCategory
+    }
+
+    private func itemMatchesCurrentTypeFilter(_ item: ClipboardItem) -> Bool {
+        fileTypeFilter == "all" || item.fileTypeToken == fileTypeFilter
+    }
+
+    private func itemMatchesPinnedFilter(_ item: ClipboardItem) -> Bool {
+        !showPinnedOnly || item.isPinned
+    }
+
+    private func searchScore(for item: ClipboardItem, query: String) -> Double {
+        let normalizedQuery = normalize(query)
+        guard !normalizedQuery.isEmpty else { return 1 }
+
+        let haystack = normalize(item.searchableText)
+        if haystack.contains(normalizedQuery) {
+            return normalize(item.title).contains(normalizedQuery) ? 1.4 : 1.0
+        }
+
+        let queryTokens = Set(normalizedQuery.split(separator: " ").map(String.init))
+        let haystackTokens = Set(haystack.split(separator: " ").map(String.init))
+        guard !queryTokens.isEmpty, !haystackTokens.isEmpty else { return 0 }
+
+        let overlap = queryTokens.intersection(haystackTokens).count
+        guard overlap > 0 else { return 0 }
+
+        let coverage = Double(overlap) / Double(queryTokens.count)
+        let titleBonus = normalize(item.title).split(separator: " ").contains { queryTokens.contains(String($0)) } ? 0.2 : 0
+        return coverage + titleBonus
+    }
+
+    private func refreshDisplayedItems() {
+        let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filteredItems = sortedItems()
+            .filter(itemMatchesCurrentCategory(_:))
+            .filter(itemMatchesCurrentTypeFilter(_:))
+            .filter(itemMatchesPinnedFilter(_:))
+
+        guard !query.isEmpty else {
+            displayedItems = filteredItems
+            return
+        }
+
+        displayedItems = filteredItems
+            .compactMap { item -> (ClipboardItem, Double)? in
+                let score = searchScore(for: item, query: query)
+                guard score > 0 else { return nil }
+                return (item, score)
+            }
+            .sorted { lhs, rhs in
+                if abs(lhs.1 - rhs.1) > 0.001 {
+                    return lhs.1 > rhs.1
+                }
+                return lhs.0.timestamp > rhs.0.timestamp
+            }
+            .map(\.0)
+    }
+
+    private func trimUnpinnedItemsToLimit() {
+        var unpinnedToRemove = items.filter { !$0.isPinned }.count - unpinnedRetentionLimit
+        guard unpinnedToRemove > 0 else { return }
+
+        let indexesToRemove = items
+            .enumerated()
+            .sorted { $0.element.timestamp < $1.element.timestamp }
+            .compactMap { index, item -> Int? in
+                guard !item.isPinned, unpinnedToRemove > 0 else { return nil }
+                unpinnedToRemove -= 1
+                return index
+            }
+            .sorted(by: >)
+
+        for index in indexesToRemove {
+            previewImages[items[index].id] = nil
+            items.remove(at: index)
+        }
+    }
+
+    private func loadInitialPreviews() {
+        for item in items {
+            loadPreview(for: item)
+        }
+    }
+
+    private func loadPreview(for item: ClipboardItem) {
+        guard item.kind == .file else { return }
+        guard previewImages[item.id] == nil else { return }
+
+        previewQueue.async { [weak self] in
+            guard let self else { return }
+            let image = PreviewFactory.previewImage(for: item)
+            guard let image else { return }
+            DispatchQueue.main.async {
+                self.previewImages[item.id] = image
             }
         }
     }
-    
-    private func loadItems() {
-        guard let url = persistenceURL, FileManager.default.fileExists(atPath: url.path) else { return }
-        do {
-            let data = try Data(contentsOf: url)
-            let loadedItems = try JSONDecoder().decode([ClipboardItem].self, from: data)
-            self.items = loadedItems
-        } catch {
-            print("Failed to load items: \(error)")
+
+    private func saveItems() {
+        guard let persistenceURL else { return }
+        let snapshot = items.map { $0.snapshot() }
+
+        DispatchQueue.global(qos: .background).async {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: persistenceURL)
+            } catch {
+                print("Failed to save clipboard history: \(error)")
+            }
         }
     }
-    
+
+    private func loadItems() {
+        guard let persistenceURL, FileManager.default.fileExists(atPath: persistenceURL.path) else { return }
+
+        do {
+            let data = try Data(contentsOf: persistenceURL)
+            items = try JSONDecoder().decode([ClipboardItem].self, from: data)
+        } catch {
+            print("Failed to load clipboard history: \(error)")
+        }
+    }
+
     private func persistAndApplyRetentionLimit() {
         let clamped = Self.clampedRetentionLimit(unpinnedRetentionLimit)
         if clamped != unpinnedRetentionLimit {
             unpinnedRetentionLimit = clamped
             return
         }
-        
+
         UserDefaults.standard.set(clamped, forKey: Self.retentionLimitKey)
         trimUnpinnedItemsToLimit()
     }
-    
-    private func trimUnpinnedItemsToLimit() {
-        var unpinnedToRemove = items.filter { !$0.isPinned }.count - unpinnedRetentionLimit
-        guard unpinnedToRemove > 0 else { return }
-        
-        for index in items.indices.reversed() where unpinnedToRemove > 0 {
-            guard !items[index].isPinned else { continue }
-            items.remove(at: index)
-            unpinnedToRemove -= 1
-        }
+
+    private func normalize(_ value: String) -> String {
+        value
+            .lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
-    private func refreshDisplayedItems() {
-        let querySnapshot = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let itemsSnapshot = items
-        
-        // If query is empty, update immediately on main thread to ensure UI is in sync
-        if querySnapshot.isEmpty {
-            self.displayedItems = itemsSnapshot
-            return
-        }
-        
-        let searchID = UUID()
-        activeSearchID = searchID
-        
-        searchQueue.async { [weak self] in
-            guard let self else { return }
-            let rankedItems = self.semanticSearchIndex.rankedItems(from: itemsSnapshot, query: querySnapshot)
-            
-            DispatchQueue.main.async {
-                guard self.activeSearchID == searchID else { return }
-                self.displayedItems = rankedItems
-            }
-        }
+
+    private static func issuePasteShortcut() {
+        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
+        guard AXIsProcessTrustedWithOptions(options) else { return }
+
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
+        let keyCode = CGKeyCode(kVK_ANSI_V)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+        keyDown?.flags = CGEventFlags.maskCommand
+        keyUp?.flags = CGEventFlags.maskCommand
+        keyDown?.post(tap: CGEventTapLocation.cghidEventTap)
+        keyUp?.post(tap: CGEventTapLocation.cghidEventTap)
     }
 }
