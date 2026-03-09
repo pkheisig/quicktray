@@ -18,7 +18,7 @@ final class LauncherPanelController: NSWindowController {
         self.settings = settings
 
         let panel = FloatingLauncherPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 750, height: 500),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -32,7 +32,7 @@ final class LauncherPanelController: NSWindowController {
         panel.hidesOnDeactivate = true
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
         panel.alphaValue = settings.windowOpacity
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -77,15 +77,16 @@ final class LauncherPanelController: NSWindowController {
     }
 
     func toggle() {
-        isVisible ? hide() : show()
+        // A non-activating panel can remain "visible" after losing focus.
+        // Only treat it as toggle-hide when it is actually the active key window.
+        (panel.isVisible && panel.isKeyWindow) ? hide() : show()
     }
 
     func show() {
         centerPanel()
         NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
-        panel.makeKey()
-        panel.makeMain()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             NSApp.setActivationPolicy(.accessory)
         }

@@ -1,67 +1,123 @@
 import SwiftUI
 import AppKit
 import Carbon.HIToolbox
+import QuickLook
 
 struct LauncherView: View {
     @ObservedObject var clipboardManager: ClipboardManager
     @ObservedObject var settings: AppSettings
+    @ObservedObject private var snippetManager = SnippetManager.shared
     let onClose: () -> Void
     let onActivateItem: (ClipboardItem, Bool) -> Void
 
     @State private var selectedItemID: UUID?
+    @State private var selectedSnippetID: UUID?
     @State private var editingItem: ClipboardItem?
+    @State private var formattingItem: ClipboardItem?
     @State private var detailItem: ClipboardItem?
+    @State private var editingTemplate: SnippetTemplate?
+    @State private var quickLookURL: URL?
     @State private var showClearConfirmation = false
     @State private var showSettings = false
+    @State private var showSettingsFromHoldKey = false
+    @State private var showNewTemplateSheet = false
     @State private var showOnboarding = false
     @State private var onboardingStep = 0
     @FocusState private var isSearchFocused: Bool
 
+    @State private var localEventMonitor: Any?
+
     private let tileColumns = 3
+    private let defaultHistoryLimitOptions = [10, 20, 50, 100, 200]
+    private static let stripCountFormatter: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .none
+        formatter.minimum = NSNumber(value: AppSettings.minCommandVStripItemCount)
+        formatter.maximum = NSNumber(value: AppSettings.maxCommandVStripItemCount)
+        return formatter
+    }()
 
     private var visibleItems: [ClipboardItem] {
         clipboardManager.displayedItems
-    }
-
-    private var recentItems: [ClipboardItem] {
-        Array(clipboardManager.items.sorted { $0.timestamp > $1.timestamp }.prefix(5))
     }
 
     private var selectedItem: ClipboardItem? {
         visibleItems.first(where: { $0.id == selectedItemID })
     }
 
+    private var visibleTemplates: [SnippetTemplate] {
+        let query = clipboardManager.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return snippetManager.templates }
+
+        let normalizedQuery = query.lowercased()
+        return snippetManager.templates.filter { template in
+            template.title.lowercased().contains(normalizedQuery)
+                || template.body.lowercased().contains(normalizedQuery)
+        }
+    }
+
+    private var selectedTemplate: SnippetTemplate? {
+        visibleTemplates.first(where: { $0.id == selectedSnippetID })
+    }
+
     private var pinnedCount: Int {
         clipboardManager.items.filter(\.isPinned).count
     }
 
-    private var activeTypeFilterLabel: String {
-        clipboardManager.fileTypeFilter == "all" ? "All types" : clipboardManager.fileTypeFilter.uppercased()
+    private var historyLimitOptions: [Int] {
+        if defaultHistoryLimitOptions.contains(clipboardManager.unpinnedRetentionLimit) {
+            return defaultHistoryLimitOptions
+        }
+        return (defaultHistoryLimitOptions + [clipboardManager.unpinnedRetentionLimit]).sorted()
     }
 
     var body: some View {
         ZStack {
             LauncherBackdrop()
 
-            VStack(spacing: 18) {
+            VStack(spacing: 0) {
                 header
-                if showSettings {
-                    settingsPanel
-                }
-                quickActions
-                productivityStrip
+                Divider().background(Color.white.opacity(0.12))
                 tabs
                 contentArea
+                footer
             }
-            .padding(22)
 
-            if showOnboarding {
-                onboardingOverlay
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            if showSettings {
+                Color.black.opacity(0.001)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        showSettingsFromHoldKey = false
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                            showSettings = false
+                        }
+                    }
+
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        settingsPanel
+                            .frame(width: 560)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Color.black.opacity(0.62))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                                    )
+                            )
+                            .shadow(color: .black.opacity(0.35), radius: 16, y: 10)
+                            .padding(.trailing, 10)
+                            .padding(.bottom, 44)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
             }
         }
-        .frame(width: 980, height: 700)
-        .background(PanelKeyHandler(onKeyDown: handleKeyDown))
+        .frame(width: 750, height: 500)
+        .quickLookPreview($quickLookURL)
         .sheet(item: $editingItem) { item in
             TextEditSheet(
                 item: item,
@@ -78,19 +134,69 @@ struct LauncherView: View {
                 onPaste: { onActivateItem(item, true) },
                 onReveal: { clipboardManager.revealInFinder(item) },
                 onOpen: { clipboardManager.openFile(item) },
-                onCopyPath: { clipboardManager.copyPathToClipboard(item: item) }
+                onCopyPath: { clipboardManager.copyPathToClipboard(item: item) },
+                onEdit: { editingItem = item }
             )
+        }
+        .sheet(item: $formattingItem) { item in
+            TextTransformSheet(
+                item: item,
+                onApply: { action in
+                    _ = clipboardManager.applyTextTransform(action, to: item, shouldPaste: false)
+                }
+            )
+        }
+        .sheet(isPresented: $showNewTemplateSheet) {
+            SnippetEditorSheet(
+                title: "New Template",
+                initialTitle: "",
+                initialBody: ""
+            ) { title, body in
+                snippetManager.addTemplate(title: title, body: body)
+                if let insertedTemplate = snippetManager.templates.last {
+                    selectedSnippetID = insertedTemplate.id
+                }
+            }
+        }
+        .sheet(item: $editingTemplate) { template in
+            SnippetEditorSheet(
+                title: "Edit Template",
+                initialTitle: template.title,
+                initialBody: template.body
+            ) { title, body in
+                snippetManager.updateTemplate(id: template.id, title: title, body: body)
+            }
         }
         .onAppear {
             syncSelection()
+            setupEventMonitor()
             if !settings.hasCompletedOnboarding {
                 showOnboarding = true
             }
         }
+        .onDisappear {
+            if let monitor = localEventMonitor {
+                NSEvent.removeMonitor(monitor)
+                localEventMonitor = nil
+            }
+            showSettingsFromHoldKey = false
+        }
         .onChange(of: clipboardManager.displayedItems.map(\.id)) { _ in
             syncSelection()
         }
+        .onChange(of: clipboardManager.selectedCategory) { _ in
+            syncSelection()
+        }
+        .onChange(of: clipboardManager.searchQuery) { _ in
+            syncSelection()
+        }
+        .onChange(of: snippetManager.templates.map(\.id)) { _ in
+            syncSelection()
+        }
         .onReceive(NotificationCenter.default.publisher(for: AppSettings.quickTrayLauncherDidShow)) { _ in
+            showSettingsFromHoldKey = false
+            selectedItemID = nil
+            selectedSnippetID = nil
             syncSelection()
             if !settings.hasCompletedOnboarding {
                 onboardingStep = 0
@@ -100,115 +206,152 @@ struct LauncherView: View {
                 isSearchFocused = true
             }
         }
+        .overlay {
+            if showOnboarding {
+                onboardingOverlay
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+            }
+        }
+    }
+
+    private func setupEventMonitor() {
+        if localEventMonitor == nil {
+            localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+                if NSApp.keyWindow == nil {
+                    return event
+                }
+                if event.type == .flagsChanged {
+                    handleModifierFlagsChanged(event)
+                    return event
+                }
+                if handleKeyDown(event) {
+                    return nil // consume the event
+                }
+                return event
+            }
+        }
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 18) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("QuickTray")
-                    .font(.system(size: 30, weight: .black, design: .rounded))
-                    .foregroundStyle(.white)
+        HStack(spacing: 12) {
+            Image(systemName: "tray.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
 
-                Text("Fast clipboard launcher for text, files, images, and drag-out paste flows.")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.65))
+            SearchField(text: $clipboardManager.searchQuery, isFocused: $isSearchFocused)
+                .frame(maxWidth: .infinity)
 
-                HStack(spacing: 10) {
-                    HotkeyPill(text: "Toggle", shortcut: settings.toggleShortcutLabel)
-                    HotkeyPill(text: "Paste 2-5", shortcut: "⌥⌘2-5")
-                    HotkeyPill(text: "Find", shortcut: "⌘F")
-                    HotkeyPill(text: "Act", shortcut: "↩ / Space")
+            if !clipboardManager.searchQuery.isEmpty {
+                Button {
+                    clipboardManager.searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.4))
                 }
-            }
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 10) {
-                HStack(spacing: 10) {
-                    SearchField(text: $clipboardManager.searchQuery, isFocused: $isSearchFocused)
-                        .frame(width: 280)
-
-                    Picker("Type", selection: $clipboardManager.fileTypeFilter) {
-                        ForEach(clipboardManager.availableFileTypeFilters, id: \.self) { typeToken in
-                            Text(typeToken == "all" ? "All types" : typeToken.uppercased())
-                                .tag(typeToken)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .frame(width: 120)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-                    ModeToggle(selection: $clipboardManager.displayMode)
-                }
-
-                HStack(spacing: 10) {
-                    Stepper(value: $clipboardManager.unpinnedRetentionLimit, in: 1...500) {
-                        Text("Keep \(clipboardManager.unpinnedRetentionLimit)")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.7))
-                    }
-                    .controlSize(.small)
-
-                    Button(showSettings ? "Hide Settings" : "Settings") {
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                            showSettings.toggle()
-                        }
-                    }
-                    .buttonStyle(QuickGlassButtonStyle())
-
-                    Button("Help") {
-                        onboardingStep = 0
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                            showOnboarding = true
-                        }
-                    }
-                    .buttonStyle(QuickGlassButtonStyle())
-
-                    if showClearConfirmation {
-                        HStack(spacing: 8) {
-                            Text("Clear all?")
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.64))
-
-                            Button("Yes") {
-                                clipboardManager.clearAll()
-                                showClearConfirmation = false
-                            }
-                            .buttonStyle(QuickGlassButtonStyle(fill: Color.red.opacity(0.74)))
-
-                            Button("No") {
-                                showClearConfirmation = false
-                            }
-                            .buttonStyle(QuickGlassButtonStyle())
-                        }
-                    } else {
-                        Button("Delete All") {
-                            showClearConfirmation = true
-                        }
-                        .buttonStyle(QuickGlassButtonStyle())
-                    }
-
-                    Button("Close") {
-                        onClose()
-                    }
-                    .buttonStyle(QuickGlassButtonStyle())
-                }
+                .buttonStyle(.plain)
             }
         }
+        .padding(.horizontal, 16)
+        .frame(height: 54)
+    }
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            if clipboardManager.selectedCategory == .snippets {
+                if selectedSnippetID != nil {
+                    HStack(spacing: 6) {
+                        Text("Return")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+                        Text("to Paste Template")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                } else {
+                    Text("Select a template to paste")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+
+                Spacer()
+            } else if selectedItemID != nil {
+                HStack(spacing: 6) {
+                    Text("Return")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+                    Text("to Paste")
+                        .font(.system(size: 11, weight: .medium))
+                }
+
+                HStack(spacing: 6) {
+                    Text("Shift+Return")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+                    Text("Plain Paste")
+                        .font(.system(size: 11, weight: .medium))
+                }
+
+                HStack(spacing: 6) {
+                    Text("Space")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
+                    Text("to Preview")
+                        .font(.system(size: 11, weight: .medium))
+                }
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    Text("\(clipboardManager.items.count) items")
+                    if pinnedCount > 0 {
+                        Text("\(pinnedCount) pinned")
+                    }
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.5))
+            } else {
+                Text("Type to search...")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.4))
+                Spacer()
+            }
+
+            Button {
+                showSettingsFromHoldKey = false
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                    showSettings.toggle()
+                }
+            } label: {
+                Image(systemName: "command")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .padding(6)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 38)
+        .background(Color.black.opacity(0.2))
     }
 
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Launcher Shortcut")
-                        .font(.system(size: 14, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Shortcut")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.7))
 
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Picker("Key", selection: $settings.toggleKeyCode) {
                             ForEach(AppSettings.availableToggleKeys) { key in
                                 Text(key.label).tag(key.keyCode)
@@ -216,210 +359,159 @@ struct LauncherView: View {
                         }
                         .pickerStyle(.menu)
                         .labelsHidden()
-                        .frame(width: 100)
+                        .frame(width: 90)
 
-                        ModifierChip(label: "⌘", isOn: settings.includesModifier(UInt32(cmdKey))) {
-                            settings.setModifier(UInt32(cmdKey), enabled: !settings.includesModifier(UInt32(cmdKey)))
+                        HStack(spacing: 4) {
+                            ModifierChip(label: "⌘", isOn: settings.includesModifier(UInt32(cmdKey))) {
+                                settings.setModifier(UInt32(cmdKey), enabled: !settings.includesModifier(UInt32(cmdKey)))
+                            }
+                            ModifierChip(label: "⌥", isOn: settings.includesModifier(UInt32(optionKey))) {
+                                settings.setModifier(UInt32(optionKey), enabled: !settings.includesModifier(UInt32(optionKey)))
+                            }
                         }
-                        ModifierChip(label: "⌥", isOn: settings.includesModifier(UInt32(optionKey))) {
-                            settings.setModifier(UInt32(optionKey), enabled: !settings.includesModifier(UInt32(optionKey)))
-                        }
-                        ModifierChip(label: "⌃", isOn: settings.includesModifier(UInt32(controlKey))) {
-                            settings.setModifier(UInt32(controlKey), enabled: !settings.includesModifier(UInt32(controlKey)))
-                        }
-                        ModifierChip(label: "⇧", isOn: settings.includesModifier(UInt32(shiftKey))) {
-                            settings.setModifier(UInt32(shiftKey), enabled: !settings.includesModifier(UInt32(shiftKey)))
-                        }
-
-                        Text(settings.toggleShortcutLabel)
-                            .font(.system(size: 12, weight: .black, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.62))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                            .background(.white.opacity(0.06), in: Capsule())
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Window Transparency")
-                        .font(.system(size: 14, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Options")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.7))
 
-                    HStack(spacing: 12) {
-                        Slider(
-                            value: Binding(
-                                get: { settings.windowOpacity },
-                                set: { settings.setWindowOpacity($0) }
-                            ),
-                            in: 0.45...1.0
-                        )
-                            .frame(width: 220)
-                        Text("\(Int(settings.windowOpacity * 100))%")
-                            .font(.system(size: 12, weight: .black, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.68))
-                            .frame(width: 44, alignment: .trailing)
+                    Toggle("Startup", isOn: $settings.showLauncherOnStartup)
+                        .controlSize(.small)
+                    Toggle("Focus Search", isOn: $settings.focusSearchOnOpen)
+                        .controlSize(.small)
+
+                    Picker("Keep History", selection: $clipboardManager.unpinnedRetentionLimit) {
+                        ForEach(historyLimitOptions, id: \.self) { limit in
+                            Text("Keep last \(limit)").tag(limit)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Hold ⌥V popup items: \(settings.commandVStripItemCount)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.75))
+
+                        HStack(spacing: 8) {
+                            Slider(
+                                value: Binding(
+                                    get: { Double(settings.commandVStripItemCount) },
+                                    set: { settings.commandVStripItemCount = Int($0.rounded()) }
+                                ),
+                                in: Double(AppSettings.minCommandVStripItemCount)...Double(AppSettings.maxCommandVStripItemCount),
+                                step: 1
+                            )
+                            .frame(width: 120)
+
+                            TextField(
+                                "",
+                                value: $settings.commandVStripItemCount,
+                                formatter: Self.stripCountFormatter
+                            )
+                            .frame(width: 36)
+                            .multilineTextAlignment(.trailing)
+                        }
                     }
                 }
+                .toggleStyle(.checkbox)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Behavior")
-                        .font(.system(size: 14, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-
-                    Toggle("Focus search whenever the launcher opens", isOn: $settings.focusSearchOnOpen)
-                        .toggleStyle(.switch)
-                        .tint(.white.opacity(0.8))
-
-                    Toggle("Open launcher when QuickTray starts", isOn: $settings.showLauncherOnStartup)
-                        .toggleStyle(.switch)
-                        .tint(.white.opacity(0.8))
-
-                    Toggle("Capture clipboard changes", isOn: $clipboardManager.isMonitoringEnabled)
-                        .toggleStyle(.switch)
-                        .tint(.white.opacity(0.8))
-
-                    Text("Mixed remains the default tab.")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.52))
-                }
-            }
-
-            HStack(spacing: 10) {
-                ShortcutHint(text: "⌘1-6 switch tabs")
-                ShortcutHint(text: "⌘C copy")
-                ShortcutHint(text: "⌘⇧C copy path")
-                ShortcutHint(text: "⌘P pin")
-                ShortcutHint(text: "⌘⌫ delete")
-                ShortcutHint(text: "Space preview")
                 Spacer()
-                Button("Reset Defaults") {
-                    settings.resetDefaults()
+
+                VStack(alignment: .trailing, spacing: 10) {
+                    Button("Delete All") {
+                        showClearConfirmation = true
+                    }
+                    .buttonStyle(QuickGlassButtonStyle(fill: .red.opacity(0.4)))
+
+                    if showClearConfirmation {
+                        HStack(spacing: 8) {
+                            Button("Confirm") {
+                                clipboardManager.clearAll()
+                                showClearConfirmation = false
+                            }
+                            .buttonStyle(QuickGlassButtonStyle(fill: .red))
+                            Button("Cancel") { showClearConfirmation = false }
+                            .buttonStyle(QuickGlassButtonStyle())
+                        }
+                    }
                 }
-                .buttonStyle(QuickGlassButtonStyle())
             }
         }
         .padding(16)
-        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-    }
-
-    private var quickActions: some View {
-        HStack(spacing: 12) {
-            ForEach(Array(recentItems.enumerated()), id: \.element.id) { index, item in
-                RecentItemChip(
-                    index: index,
-                    item: item,
-                    previewImage: clipboardManager.previewImage(for: item),
-                    isSelected: item.id == selectedItemID,
-                    onTap: {
-                        selectedItemID = item.id
-                    },
-                    onDoubleTap: {
-                        onActivateItem(item, true)
-                    }
-                )
-            }
-
-            if recentItems.isEmpty {
-                Text("Copy something to start building a tray.")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(18)
-                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            }
-        }
-    }
-
-    private var productivityStrip: some View {
-        HStack(spacing: 10) {
-            StatPill(title: "Items", value: "\(clipboardManager.items.count)")
-            StatPill(title: "Pinned", value: "\(pinnedCount)")
-            StatPill(title: "Mode", value: clipboardManager.displayMode == .list ? "List" : "Tiles")
-
-            Button(clipboardManager.isMonitoringEnabled ? "Pause Capture" : "Resume Capture") {
-                clipboardManager.toggleMonitoring()
-            }
-            .buttonStyle(QuickGlassButtonStyle(fill: clipboardManager.isMonitoringEnabled ? Color.white.opacity(0.1) : Color.orange.opacity(0.65)))
-
-            Button(clipboardManager.showPinnedOnly ? "Pinned Only" : "All Items") {
-                clipboardManager.showPinnedOnly.toggle()
-            }
-            .buttonStyle(QuickGlassButtonStyle(fill: clipboardManager.showPinnedOnly ? Color.white.opacity(0.2) : Color.white.opacity(0.08)))
-
-            Spacer()
-
-            Button("Paste Selected") {
-                pasteSelected()
-            }
-            .buttonStyle(QuickGlassButtonStyle(fill: Color.white.opacity(0.14)))
-
-            Button("Copy Selected") {
-                copySelected()
-            }
-            .buttonStyle(QuickGlassButtonStyle())
-
-            if selectedItem?.kind == .file {
-                Button("Copy Path") {
-                    copySelectedPath()
-                }
-                .buttonStyle(QuickGlassButtonStyle())
-
-                Button("Open") {
-                    openSelected()
-                }
-                .buttonStyle(QuickGlassButtonStyle())
-            }
-        }
+        .background(Color.black.opacity(0.3))
     }
 
     private var tabs: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 16) {
             ForEach(Array(ClipboardCategory.allCases.enumerated()), id: \.element.id) { index, category in
                 Button {
                     clipboardManager.selectedCategory = category
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 4) {
                         Image(systemName: category.symbolName)
+                            .font(.system(size: 11))
                         Text(category.title)
-                        Text("\(index + 1)")
-                            .opacity(0.56)
+                            .font(.system(size: 11, weight: .medium))
                     }
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(clipboardManager.selectedCategory == category ? Color.black : Color.white.opacity(0.76))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(clipboardManager.selectedCategory == category ? Color.white.opacity(0.94) : Color.white.opacity(0.07))
-                    )
+                    .foregroundStyle(clipboardManager.selectedCategory == category ? Color.white : Color.white.opacity(0.4))
+                    .padding(.vertical, 8)
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .bottom) {
+                        if clipboardManager.selectedCategory == category {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.8))
+                                .frame(height: 2)
+                                .offset(y: 8)
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
             }
 
             Spacer()
 
-            Text(clipboardManager.showPinnedOnly ? "Pinned • \(activeTypeFilterLabel)" : activeTypeFilterLabel)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.white.opacity(0.58))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(.white.opacity(0.06), in: Capsule())
+            if clipboardManager.selectedCategory != .snippets {
+                ModeToggle(selection: $clipboardManager.displayMode)
+            }
         }
+        .padding(.horizontal, 16)
+        .frame(height: 34)
+        .background(Color.black.opacity(0.1))
     }
 
     private var contentArea: some View {
         Group {
-            if visibleItems.isEmpty {
-                emptyState
+            if clipboardManager.selectedCategory == .snippets {
+                snippetsArea
+            } else if visibleItems.isEmpty {
+                emptyState(text: "No results")
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        if clipboardManager.displayMode == .list {
-                            LazyVStack(spacing: 12) {
+                        if clipboardManager.displayMode == .compact {
+                            LazyVStack(spacing: 0) {
+                                ForEach(visibleItems) { item in
+                                    LauncherCompactCard(
+                                        item: item,
+                                        sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
+                                        isSelected: item.id == selectedItemID,
+                                        onSelect: { selectedItemID = item.id },
+                                        onPaste: { onActivateItem(item, true) },
+                                        onStartDrag: startDraggingSelectedItem
+                                    )
+                                }
+                            }
+                            .padding(.vertical, 8)
+                        } else if clipboardManager.displayMode == .list {
+                            LazyVStack(spacing: 0) {
                                 ForEach(visibleItems) { item in
                                     LauncherListCard(
                                         item: item,
                                         previewImage: clipboardManager.previewImage(for: item),
+                                        sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: item.id == selectedItemID,
                                         onSelect: { selectedItemID = item.id },
                                         onCopy: { onActivateItem(item, false) },
@@ -429,17 +521,19 @@ struct LauncherView: View {
                                         onEdit: item.canEdit ? { editingItem = item } : nil,
                                         onDetail: { detailItem = item },
                                         onDelete: { clipboardManager.removeItem(id: item.id) },
-                                        onPin: { clipboardManager.togglePin(for: item.id) }
+                                        onPin: { clipboardManager.togglePin(for: item.id) },
+                                        onStartDrag: startDraggingSelectedItem
                                     )
-                                    .id(item.id)
                                 }
                             }
+                            .padding(.vertical, 8)
                         } else {
                             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: tileColumns), spacing: 12) {
                                 ForEach(visibleItems) { item in
                                     LauncherTileCard(
                                         item: item,
                                         previewImage: clipboardManager.previewImage(for: item),
+                                        sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: item.id == selectedItemID,
                                         onSelect: { selectedItemID = item.id },
                                         onCopy: { onActivateItem(item, false) },
@@ -449,16 +543,17 @@ struct LauncherView: View {
                                         onEdit: item.canEdit ? { editingItem = item } : nil,
                                         onDetail: { detailItem = item },
                                         onDelete: { clipboardManager.removeItem(id: item.id) },
-                                        onPin: { clipboardManager.togglePin(for: item.id) }
+                                        onPin: { clipboardManager.togglePin(for: item.id) },
+                                        onStartDrag: startDraggingSelectedItem
                                     )
-                                    .id(item.id)
                                 }
                             }
+                            .padding(12)
                         }
                     }
                     .onChange(of: selectedItemID) { itemID in
                         guard let itemID else { return }
-                        withAnimation(.easeInOut(duration: 0.18)) {
+                        withAnimation(.easeInOut(duration: 0.12)) {
                             proxy.scrollTo(itemID, anchor: .center)
                         }
                     }
@@ -468,22 +563,78 @@ struct LauncherView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 14) {
-            Spacer()
-            Image(systemName: "tray.and.arrow.down.fill")
-                .font(.system(size: 34, weight: .black))
-                .foregroundStyle(.white.opacity(0.34))
-            Text("No items in this view")
-                .font(.system(size: 22, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-            Text("Try a different tab, clear the file type filter, or copy a new item.")
-                .font(.system(size: 13, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.58))
-            Spacer()
+    private func emptyState(text: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "tray")
+                .font(.system(size: 24))
+                .foregroundStyle(.white.opacity(0.2))
+            Text(text)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.5))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+
+    private var snippetsArea: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Button {
+                    showNewTemplateSheet = true
+                } label: {
+                    Label("New Template", systemImage: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(QuickGlassButtonStyle(fill: .white.opacity(0.12)))
+
+                TextField("Default email variable", text: $snippetManager.defaultEmail)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            if visibleTemplates.isEmpty {
+                emptyState(text: "No templates")
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(visibleTemplates) { template in
+                                SnippetRow(
+                                    template: template,
+                                    renderedPreview: snippetManager.renderedText(for: template),
+                                    isSelected: template.id == selectedSnippetID,
+                                    onSelect: { selectedSnippetID = template.id },
+                                    onPaste: {
+                                        onClose()
+                                        snippetManager.pasteTemplate(template, shouldPaste: true)
+                                    },
+                                    onEdit: {
+                                        editingTemplate = template
+                                    },
+                                    onDelete: {
+                                        snippetManager.removeTemplate(id: template.id)
+                                    }
+                                )
+                            }
+                        }
+                        .padding(.vertical, 8)
+                    }
+                    .onChange(of: selectedSnippetID) { snippetID in
+                        guard let snippetID else { return }
+                        withAnimation(.easeInOut(duration: 0.12)) {
+                            proxy.scrollTo(snippetID, anchor: .center)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var onboardingOverlay: some View {
@@ -586,10 +737,10 @@ struct LauncherView: View {
             .padding(24)
             .frame(width: 760)
             .background(
-                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color(red: 0.12, green: 0.14, blue: 0.17).opacity(0.96))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
                     )
             )
@@ -621,9 +772,9 @@ struct LauncherView: View {
                 title: "The fastest path is keyboard-first",
                 subtitle: "You can still click around, but the speed comes from the shortcuts.",
                 points: [
-                    "Arrow keys move selection, Return pastes, and Space previews the selected item.",
-                    "Use ⌘F to jump into search, ⌘1-6 to switch tabs, and T to flip between list and tile view.",
-                    "Use ⌥⌘2-5 to instantly paste the 2nd, 3rd, 4th, or 5th most recent clipboard item."
+                    "Arrow keys move selection, Return pastes, Shift+Return pastes plain text, and Space previews.",
+                    "Use ⌘F for search, ⌘K for quick formatting, and ⌘1-7 to switch tabs (7 = Snippets).",
+                    "Use ⌥⌘2-5 for quick recent paste, and ⌥⇧⌘V to paste your captured stack in copy order."
                 ]
             )
         ]
@@ -634,10 +785,20 @@ struct LauncherView: View {
     }
 
     private func syncSelection() {
+        if clipboardManager.selectedCategory == .snippets {
+            selectedItemID = nil
+            if let selectedSnippetID, visibleTemplates.contains(where: { $0.id == selectedSnippetID }) {
+                return
+            }
+            selectedSnippetID = visibleTemplates.first?.id
+            return
+        }
+
+        selectedSnippetID = nil
         if let selectedItemID, visibleItems.contains(where: { $0.id == selectedItemID }) {
             return
         }
-        selectedItemID = visibleItems.first?.id
+        selectedItemID = clipboardManager.preferredSelectionID(in: visibleItems)
     }
 
     private func copySelected() {
@@ -645,9 +806,31 @@ struct LauncherView: View {
         onActivateItem(selectedItem, false)
     }
 
-    private func pasteSelected() {
+    private func pasteSelected(asPlainText: Bool = false) {
         guard let selectedItem else { return }
+        if asPlainText {
+            onClose()
+            clipboardManager.copyToClipboard(item: selectedItem, shouldPaste: true, asPlainText: true)
+            return
+        }
         onActivateItem(selectedItem, true)
+    }
+
+    private func copySelectedTemplate() {
+        guard let selectedTemplate else { return }
+        clipboardManager.copyTextToClipboard(
+            snippetManager.renderedText(for: selectedTemplate),
+            shouldPaste: false,
+            addToHistory: true,
+            sourceApplicationName: "QuickTray Snippet",
+            sourceBundleIdentifier: Bundle.main.bundleIdentifier
+        )
+    }
+
+    private func pasteSelectedTemplate() {
+        guard let selectedTemplate else { return }
+        onClose()
+        snippetManager.pasteTemplate(selectedTemplate, shouldPaste: true)
     }
 
     private func copySelectedPath() {
@@ -670,6 +853,41 @@ struct LauncherView: View {
         clipboardManager.fileTypeFilter = "all"
         clipboardManager.selectedCategory = .mixed
         clipboardManager.showPinnedOnly = false
+    }
+
+    private func startDraggingSelectedItem() {
+        showSettingsFromHoldKey = false
+        showSettings = false
+        DispatchQueue.main.async {
+            onClose()
+        }
+    }
+
+    private func handleModifierFlagsChanged(_ event: NSEvent) {
+        if showOnboarding {
+            return
+        }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Primary: hold Command. Fallback: hold Control.
+        let shouldShowFromHold = modifiers.contains(.command) || modifiers.contains(.control)
+
+        if shouldShowFromHold {
+            if !showSettingsFromHoldKey {
+                showSettingsFromHoldKey = true
+                withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
+                    showSettings = true
+                }
+            }
+            return
+        }
+
+        if showSettingsFromHoldKey {
+            showSettingsFromHoldKey = false
+            withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
+                showSettings = false
+            }
+        }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
@@ -701,30 +919,45 @@ struct LauncherView: View {
                 isSearchFocused = true
                 return true
             case kVK_ANSI_C:
-                if modifiers.contains(.shift) {
+                if clipboardManager.selectedCategory == .snippets {
+                    copySelectedTemplate()
+                } else if modifiers.contains(.shift) {
                     copySelectedPath()
                 } else {
                     copySelected()
                 }
                 return true
             case kVK_ANSI_E:
-                if let selectedItem, selectedItem.canEdit {
+                if clipboardManager.selectedCategory == .snippets, let selectedTemplate {
+                    editingTemplate = selectedTemplate
+                } else if let selectedItem, selectedItem.canEdit {
                     editingItem = selectedItem
                 }
                 return true
+            case kVK_ANSI_K:
+                if let selectedItem, selectedItem.canEdit {
+                    formattingItem = selectedItem
+                }
+                return true
             case kVK_ANSI_P:
-                if let selectedItem {
+                if clipboardManager.selectedCategory != .snippets, let selectedItem {
                     clipboardManager.togglePin(for: selectedItem.id)
                 }
                 return true
             case kVK_ANSI_O:
-                openSelected()
+                if clipboardManager.selectedCategory != .snippets {
+                    openSelected()
+                }
                 return true
             case kVK_ANSI_R:
-                revealSelected()
+                if clipboardManager.selectedCategory != .snippets {
+                    revealSelected()
+                }
                 return true
             case kVK_Delete, kVK_ForwardDelete:
-                if let selectedItem {
+                if clipboardManager.selectedCategory == .snippets, let selectedTemplate {
+                    snippetManager.removeTemplate(id: selectedTemplate.id)
+                } else if let selectedItem {
                     clipboardManager.removeItem(id: selectedItem.id)
                 }
                 return true
@@ -749,7 +982,11 @@ struct LauncherView: View {
             case kVK_ANSI_6:
                 clipboardManager.selectedCategory = .files
                 return true
+            case kVK_ANSI_7:
+                clipboardManager.selectedCategory = .snippets
+                return true
             case kVK_ANSI_Comma:
+                showSettingsFromHoldKey = false
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
                     showSettings.toggle()
                 }
@@ -764,35 +1001,62 @@ struct LauncherView: View {
             onClose()
             return true
         case kVK_Return:
-            pasteSelected()
+            if clipboardManager.selectedCategory == .snippets {
+                pasteSelectedTemplate()
+            } else if modifiers.contains(.shift) {
+                pasteSelected(asPlainText: true)
+            } else {
+                pasteSelected()
+            }
             return true
         case kVK_Space:
+            if isSearchFocused { return false }
+            if clipboardManager.selectedCategory == .snippets {
+                return true
+            }
             if let selectedItem {
-                detailItem = selectedItem
+                if selectedItem.kind == .file, let url = selectedItem.fileURL {
+                    quickLookURL = url
+                } else {
+                    detailItem = selectedItem
+                }
             }
             return true
         case kVK_LeftArrow:
+            if isSearchFocused { return false }
             moveSelection(step: -1)
             return true
         case kVK_RightArrow:
+            if isSearchFocused { return false }
             moveSelection(step: 1)
             return true
         case kVK_UpArrow:
-            moveSelection(step: clipboardManager.displayMode == .tiles ? -tileColumns : -1)
+            let upStep = clipboardManager.selectedCategory == .snippets
+                ? -1
+                : (clipboardManager.displayMode == .tiles ? -tileColumns : -1)
+            moveSelection(step: upStep)
             return true
         case kVK_DownArrow:
-            moveSelection(step: clipboardManager.displayMode == .tiles ? tileColumns : 1)
+            let downStep = clipboardManager.selectedCategory == .snippets
+                ? 1
+                : (clipboardManager.displayMode == .tiles ? tileColumns : 1)
+            moveSelection(step: downStep)
             return true
         case kVK_ANSI_S:
+            showSettingsFromHoldKey = false
             withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
                 showSettings.toggle()
             }
             return true
         case kVK_ANSI_T:
-            clipboardManager.displayMode = clipboardManager.displayMode == .list ? .tiles : .list
+            if clipboardManager.selectedCategory != .snippets {
+                clipboardManager.displayMode = clipboardManager.displayMode == .list ? .tiles : .list
+            }
             return true
         case kVK_ANSI_P:
-            clipboardManager.showPinnedOnly.toggle()
+            if clipboardManager.selectedCategory != .snippets {
+                clipboardManager.showPinnedOnly.toggle()
+            }
             return true
         case kVK_ANSI_Slash:
             isSearchFocused = true
@@ -803,8 +1067,24 @@ struct LauncherView: View {
     }
 
     private func moveSelection(step: Int) {
+        if clipboardManager.selectedCategory == .snippets {
+            guard !visibleTemplates.isEmpty else {
+                selectedSnippetID = nil
+                return
+            }
+
+            guard let currentIndex = visibleTemplates.firstIndex(where: { $0.id == selectedSnippetID }) else {
+                selectedSnippetID = visibleTemplates.first?.id
+                return
+            }
+
+            let nextIndex = min(max(currentIndex + step, 0), visibleTemplates.count - 1)
+            selectedSnippetID = visibleTemplates[nextIndex].id
+            return
+        }
+
         guard let currentIndex = visibleItems.firstIndex(where: { $0.id == selectedItemID }) else {
-            selectedItemID = visibleItems.first?.id
+            selectedItemID = clipboardManager.preferredSelectionID(in: visibleItems)
             return
         }
 
@@ -828,53 +1108,12 @@ private struct OnboardingPage {
 
 private struct LauncherBackdrop: View {
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [Color(red: 0.09, green: 0.1, blue: 0.13), Color(red: 0.12, green: 0.16, blue: 0.19)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(.ultraThinMaterial)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
             )
-
-            Circle()
-                .fill(Color(red: 0.91, green: 0.55, blue: 0.33).opacity(0.24))
-                .frame(width: 260, height: 260)
-                .blur(radius: 14)
-                .offset(x: -260, y: -230)
-
-            Circle()
-                .fill(Color(red: 0.37, green: 0.62, blue: 0.95).opacity(0.18))
-                .frame(width: 320, height: 320)
-                .blur(radius: 30)
-                .offset(x: 300, y: 240)
-
-            RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .fill(.ultraThinMaterial.opacity(0.78))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 34, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
-                )
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
-        .shadow(color: Color.black.opacity(0.35), radius: 28, y: 22)
-        .padding(6)
-    }
-}
-
-private struct HotkeyPill: View {
-    let text: String
-    let shortcut: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(text.uppercased())
-                .foregroundStyle(.white.opacity(0.5))
-            Text(shortcut)
-                .foregroundStyle(.white)
-        }
-        .font(.system(size: 11, weight: .heavy, design: .rounded))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(.white.opacity(0.06), in: Capsule())
     }
 }
 
@@ -883,11 +1122,11 @@ private struct ShortcutHint: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .foregroundStyle(.white.opacity(0.62))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.white.opacity(0.06), in: Capsule())
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.white.opacity(0.5))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
     }
 }
 
@@ -945,17 +1184,12 @@ private struct SearchField: View {
     var isFocused: FocusState<Bool>.Binding
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.white.opacity(0.46))
-            TextField("Search names, snippets, and paths", text: $text)
-                .textFieldStyle(.plain)
-                .foregroundStyle(.white)
-                .focused(isFocused)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        TextField("Search history...", text: $text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 16, weight: .regular))
+            .foregroundStyle(.white)
+            .focused(isFocused)
+            .padding(.vertical, 16)
     }
 }
 
@@ -963,102 +1197,109 @@ private struct ModeToggle: View {
     @Binding var selection: ClipboardDisplayMode
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 2) {
             ForEach(ClipboardDisplayMode.allCases) { mode in
                 Button {
                     selection = mode
                 } label: {
                     Image(systemName: mode.symbolName)
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(selection == mode ? Color.black : Color.white.opacity(0.72))
-                        .frame(width: 38, height: 34)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(selection == mode ? Color.white : Color.white.opacity(0.06))
-                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(selection == mode ? Color.white : Color.white.opacity(0.3))
+                        .frame(width: 28, height: 28)
+                        .background(selection == mode ? Color.white.opacity(0.1) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(4)
-        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(2)
+        .background(Color.black.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
-private struct StatPill: View {
-    let title: String
-    let value: String
+private struct SourceApplicationBadge: View {
+    let sourceName: String?
+    let sourceIcon: NSImage?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .black, design: .rounded))
-                .foregroundStyle(.white.opacity(0.44))
-            Text(value)
-                .font(.system(size: 14, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-private struct RecentItemChip: View {
-    let index: Int
-    let item: ClipboardItem
-    let previewImage: NSImage?
-    let isSelected: Bool
-    let onTap: () -> Void
-    let onDoubleTap: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(index == 0 ? "LATEST" : "⌥⌘\(index + 1)")
-                    .font(.system(size: 10, weight: .black, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.54))
-                Spacer()
-                if item.isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 10, weight: .black))
-                        .foregroundStyle(Color(red: 1, green: 0.82, blue: 0.38))
+        if sourceName != nil || sourceIcon != nil {
+            HStack(spacing: 4) {
+                if let sourceIcon {
+                    Image(nsImage: sourceIcon)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 12, height: 12)
+                        .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                } else {
+                    Image(systemName: "app")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.45))
                 }
-            }
 
-            HStack(spacing: 12) {
-                PreviewBadge(item: item, previewImage: previewImage, side: 46)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.title)
+                if let sourceName, !sourceName.isEmpty {
+                    Text(sourceName)
                         .lineLimit(1)
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text(item.fileTypeToken.uppercased())
-                        .font(.system(size: 10, weight: .black, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.46))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.52))
                 }
-                Spacer()
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(.white.opacity(0.06), in: Capsule())
+        }
+    }
+}
+
+private struct LauncherCompactCard: View {
+    let item: ClipboardItem
+    let sourceAppIcon: NSImage?
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onPaste: () -> Void
+    let onStartDrag: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: item.primaryCategory.symbolName)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.4))
+                .frame(width: 16)
+
+            Text(item.title)
+                .lineLimit(1)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isSelected ? .white : .white.opacity(0.8))
+
+            Spacer()
+
+            SourceApplicationBadge(
+                sourceName: item.sourceApplicationName,
+                sourceIcon: sourceAppIcon
+            )
+
+            if item.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.4))
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(isSelected ? Color.white.opacity(0.14) : Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(isSelected ? Color.white.opacity(0.24) : Color.clear, lineWidth: 1)
-                )
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture(perform: onTap)
-        .onTapGesture(count: 2, perform: onDoubleTap)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onTapGesture(count: 2, perform: onPaste)
+        .onDrag {
+            onStartDrag()
+            return item.dragItemProvider() ?? NSItemProvider()
+        }
     }
 }
 
 private struct LauncherListCard: View {
     let item: ClipboardItem
     let previewImage: NSImage?
+    let sourceAppIcon: NSImage?
     let isSelected: Bool
     let onSelect: () -> Void
     let onCopy: () -> Void
@@ -1069,69 +1310,53 @@ private struct LauncherListCard: View {
     let onDetail: () -> Void
     let onDelete: () -> Void
     let onPin: () -> Void
+    let onStartDrag: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 16) {
-            PreviewBadge(item: item, previewImage: previewImage, side: 72)
+        HStack(spacing: 12) {
+            PreviewBadge(item: item, previewImage: previewImage, side: 36)
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
-                    Text(item.title)
-                        .lineLimit(1)
-                        .font(.system(size: 16, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-
-                    Label(item.fileTypeToken.uppercased(), systemImage: item.primaryCategory.symbolName)
-                        .font(.system(size: 10, weight: .black, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.52))
-                }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .lineLimit(1)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isSelected ? .white : .white.opacity(0.9))
 
                 Text(item.detailText)
-                    .lineLimit(2)
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.66))
+                    .lineLimit(1)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .white.opacity(0.5))
 
-                HStack(spacing: 8) {
-                    if item.isPinned {
-                        MiniMetaLabel(text: "Pinned", accent: Color(red: 1, green: 0.84, blue: 0.38))
-                    }
-                    MiniMetaLabel(text: item.timestamp.formatted(date: .omitted, time: .shortened), accent: .white.opacity(0.2))
-                }
+                SourceApplicationBadge(
+                    sourceName: item.sourceApplicationName,
+                    sourceIcon: sourceAppIcon
+                )
             }
 
             Spacer()
 
-            HStack(spacing: 8) {
-                ActionButton(symbol: "doc.on.doc.fill", title: "Copy", action: onCopy)
-                ActionButton(symbol: "arrowshape.turn.up.right.fill", title: "Paste", action: onPaste)
-                if let onOpen {
-                    ActionButton(symbol: "arrow.up.forward.app.fill", title: "Open", action: onOpen)
-                }
-                if let onCopyPath {
-                    ActionButton(symbol: "link", title: "Path", action: onCopyPath)
-                }
-                if let onEdit {
-                    ActionButton(symbol: "pencil", title: "Edit", action: onEdit)
-                }
-                ActionButton(symbol: "eye.fill", title: "Detail", action: onDetail)
-                ActionButton(symbol: item.isPinned ? "pin.slash.fill" : "pin.fill", title: "Pin", action: onPin)
-                ActionButton(symbol: "trash.fill", title: "Delete", action: onDelete)
+            if item.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.4))
             }
+
+            Text(item.fileTypeToken.uppercased())
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.3))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(isSelected ? Color.white.opacity(0.13) : Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .strokeBorder(isSelected ? Color.white.opacity(0.2) : Color.white.opacity(0.06), lineWidth: 1)
-                )
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+        .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onTapGesture(count: 2, perform: onPaste)
         .onDrag {
-            item.dragItemProvider() ?? NSItemProvider()
+            onStartDrag()
+            return item.dragItemProvider() ?? NSItemProvider()
         }
     }
 }
@@ -1139,6 +1364,7 @@ private struct LauncherListCard: View {
 private struct LauncherTileCard: View {
     let item: ClipboardItem
     let previewImage: NSImage?
+    let sourceAppIcon: NSImage?
     let isSelected: Bool
     let onSelect: () -> Void
     let onCopy: () -> Void
@@ -1149,68 +1375,40 @@ private struct LauncherTileCard: View {
     let onDetail: () -> Void
     let onDelete: () -> Void
     let onPin: () -> Void
+    let onStartDrag: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ZStack(alignment: .topTrailing) {
-                PreviewCanvas(item: item, previewImage: previewImage)
-
+        PreviewCanvas(item: item, previewImage: previewImage)
+            .overlay(alignment: .topTrailing) {
                 if item.isPinned {
                     Image(systemName: "pin.fill")
-                        .font(.system(size: 11, weight: .black))
-                        .foregroundStyle(Color(red: 1, green: 0.84, blue: 0.38))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .background(Color.black.opacity(0.4), in: Circle())
                         .padding(8)
-                        .background(.black.opacity(0.2), in: Circle())
-                        .padding(10)
                 }
             }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(item.title)
-                    .lineLimit(1)
-                    .font(.system(size: 15, weight: .black, design: .rounded))
-                    .foregroundStyle(.white)
-
-                Text(item.detailText)
-                    .lineLimit(3)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.62))
-            }
-
-            HStack(spacing: 8) {
-                SmallActionButton(symbol: "doc.on.doc.fill", action: onCopy)
-                SmallActionButton(symbol: "arrowshape.turn.up.right.fill", action: onPaste)
-                if let onOpen {
-                    SmallActionButton(symbol: "arrow.up.forward.app.fill", action: onOpen)
-                }
-                if let onCopyPath {
-                    SmallActionButton(symbol: "link", action: onCopyPath)
-                }
-                if let onEdit {
-                    SmallActionButton(symbol: "pencil", action: onEdit)
-                }
-                SmallActionButton(symbol: "eye.fill", action: onDetail)
-                SmallActionButton(symbol: item.isPinned ? "pin.slash.fill" : "pin.fill", action: onPin)
-                Spacer()
-                SmallActionButton(symbol: "trash.fill", action: onDelete)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 282, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(isSelected ? Color.white.opacity(0.13) : Color.white.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
-                        .strokeBorder(isSelected ? Color.white.opacity(0.22) : Color.white.opacity(0.05), lineWidth: 1)
+            .overlay(alignment: .bottomLeading) {
+                SourceApplicationBadge(
+                    sourceName: item.sourceApplicationName,
+                    sourceIcon: sourceAppIcon
                 )
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .onTapGesture(perform: onSelect)
-        .onTapGesture(count: 2, perform: onPaste)
-        .onDrag {
-            item.dragItemProvider() ?? NSItemProvider()
-        }
+                .padding(8)
+            }
+            .padding(6)
+            .background(isSelected ? Color.white.opacity(0.15) : Color.white.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1)
+            )
+            .onTapGesture(perform: onSelect)
+            .onTapGesture(count: 2, perform: onPaste)
+            .onDrag {
+                onStartDrag()
+                return item.dragItemProvider() ?? NSItemProvider()
+            }
     }
 }
 
@@ -1221,8 +1419,8 @@ private struct PreviewBadge: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: side * 0.28, style: .continuous)
-                .fill(Color.white.opacity(0.09))
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.white.opacity(0.1))
 
             if let previewImage {
                 Image(nsImage: previewImage)
@@ -1230,11 +1428,11 @@ private struct PreviewBadge: View {
                     .scaledToFill()
                     .frame(width: side, height: side)
                     .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: side * 0.28, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             } else {
                 Image(systemName: iconName)
-                    .font(.system(size: side * 0.32, weight: .black))
-                    .foregroundStyle(.white.opacity(0.76))
+                    .font(.system(size: side * 0.4))
+                    .foregroundStyle(.white.opacity(0.5))
             }
         }
         .frame(width: side, height: side)
@@ -1242,12 +1440,9 @@ private struct PreviewBadge: View {
 
     private var iconName: String {
         switch item.kind {
-        case .text:
-            return "text.alignleft"
-        case .image:
-            return "photo.fill"
-        case .file:
-            return item.primaryCategory == .video ? "film.stack.fill" : "doc.fill"
+        case .text: return "text.alignleft"
+        case .image: return "photo.fill"
+        case .file: return item.primaryCategory == .video ? "film.fill" : "doc.fill"
         }
     }
 }
@@ -1258,82 +1453,207 @@ private struct PreviewCanvas: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(Color.black.opacity(0.2))
 
             if let previewImage {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, minHeight: 150, maxHeight: 150)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                Color.clear
+                    .overlay(
+                        Image(nsImage: previewImage)
+                            .resizable()
+                            .scaledToFill()
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else if item.kind == .text, let textContent = item.textContent {
                 Text(textContent)
-                    .lineLimit(6)
-                    .multilineTextAlignment(.leading)
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .padding(18)
+                    .lineLimit(4)
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .padding(12)
             } else {
                 Image(systemName: item.primaryCategory.symbolName)
-                    .font(.system(size: 34, weight: .black))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .font(.system(size: 24))
+                    .foregroundStyle(.white.opacity(0.3))
             }
         }
-        .frame(height: 150)
+        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 120)
+        .clipped()
     }
 }
 
-private struct MiniMetaLabel: View {
-    let text: String
-    let accent: Color
+private struct SnippetRow: View {
+    let template: SnippetTemplate
+    let renderedPreview: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onPaste: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 10, weight: .black, design: .rounded))
-            .foregroundStyle(.white.opacity(0.62))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .background(accent, in: Capsule())
+        HStack(spacing: 12) {
+            Image(systemName: "text.badge.plus")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.6))
+                .frame(width: 16)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(template.title)
+                        .lineLimit(1)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isSelected ? .white : .white.opacity(0.86))
+
+                    if template.isBuiltIn {
+                        Text("Built-In")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.58))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(.white.opacity(0.08), in: Capsule())
+                    }
+                }
+
+                Text(renderedPreview)
+                    .lineLimit(2)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Button {
+                    onEdit()
+                } label: {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.65))
+
+                if !template.isBuiltIn {
+                    Button {
+                        onDelete()
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red.opacity(0.8))
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onTapGesture(count: 2, perform: onPaste)
     }
 }
 
-private struct ActionButton: View {
-    let symbol: String
+private struct TextTransformSheet: View {
+    let item: ClipboardItem
+    let onApply: (TextTransformAction) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Quick Formatting")
+                .font(.system(size: 20, weight: .black, design: .rounded))
+
+            Text("Pick an action for the selected text clip. The transformed output is copied back to your clipboard.")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            ForEach(TextTransformAction.allCases) { action in
+                Button {
+                    onApply(action)
+                    dismiss()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: action.symbolName)
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 16)
+                        Text(action.title)
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(.black.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+
+            Text(item.title)
+                .lineLimit(1)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(width: 460, height: 360)
+    }
+}
+
+private struct SnippetEditorSheet: View {
     let title: String
-    let action: () -> Void
+    let initialTitle: String
+    let initialBody: String
+    let onSave: (String, String) -> Void
 
-    var body: some View {
-        Button(action: action) {
-            VStack(spacing: 5) {
-                Image(systemName: symbol)
-                    .font(.system(size: 12, weight: .bold))
-                Text(title)
-                    .font(.system(size: 10, weight: .black, design: .rounded))
-            }
-            .foregroundStyle(.white.opacity(0.78))
-            .frame(width: 56, height: 54)
-            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(.plain)
+    @Environment(\.dismiss) private var dismiss
+    @State private var snippetTitle: String
+    @State private var snippetBody: String
+
+    init(
+        title: String,
+        initialTitle: String,
+        initialBody: String,
+        onSave: @escaping (String, String) -> Void
+    ) {
+        self.title = title
+        self.initialTitle = initialTitle
+        self.initialBody = initialBody
+        self.onSave = onSave
+        _snippetTitle = State(initialValue: initialTitle)
+        _snippetBody = State(initialValue: initialBody)
     }
-}
-
-private struct SmallActionButton: View {
-    let symbol: String
-    let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 11, weight: .black))
-                .foregroundStyle(.white.opacity(0.82))
-                .frame(width: 30, height: 30)
-                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        VStack(alignment: .leading, spacing: 14) {
+            Text(title)
+                .font(.system(size: 20, weight: .black, design: .rounded))
+
+            TextField("Template title", text: $snippetTitle)
+                .textFieldStyle(.roundedBorder)
+
+            TextEditor(text: $snippetBody)
+                .font(.system(size: 13, weight: .medium))
+                .frame(minHeight: 220)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color.secondary.opacity(0.2), lineWidth: 1)
+                )
+
+            Text("Variables: {{date}}, {{time}}, {{datetime}}, {{iso_date}}, {{email}}, {{clipboard}}")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    onSave(snippetTitle, snippetBody)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(20)
+        .frame(width: 620, height: 430)
     }
 }
 
@@ -1384,6 +1704,7 @@ private struct DetailSheet: View {
     let onReveal: () -> Void
     let onOpen: () -> Void
     let onCopyPath: () -> Void
+    let onEdit: () -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -1425,6 +1746,15 @@ private struct DetailSheet: View {
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
+                .disabled(true)
+
+                if item.canEdit {
+                    Button("Edit") {
+                        dismiss()
+                        onEdit()
+                    }
+                    .buttonStyle(.bordered)
+                }
 
                 if item.kind == .file {
                     Button("Copy Path") {
@@ -1471,37 +1801,16 @@ private struct QuickGlassButtonStyle: ButtonStyle {
     }
 }
 
-private struct PanelKeyHandler: NSViewRepresentable {
-    let onKeyDown: (NSEvent) -> Bool
-
-    func makeNSView(context: Context) -> KeyView {
-        let view = KeyView()
-        view.onKeyDown = onKeyDown
-        DispatchQueue.main.async {
-            view.window?.makeFirstResponder(view)
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: KeyView, context: Context) {
-        nsView.onKeyDown = onKeyDown
-        DispatchQueue.main.async {
-            nsView.window?.makeFirstResponder(nsView)
-        }
-    }
-
-    final class KeyView: NSView {
-        var onKeyDown: ((NSEvent) -> Bool)?
-
-        override var acceptsFirstResponder: Bool {
-            true
-        }
-
-        override func keyDown(with event: NSEvent) {
-            if onKeyDown?(event) == true {
-                return
-            }
-            super.keyDown(with: event)
-        }
-    }
+#Preview {
+    let previewSettings = AppSettings.shared
+    previewSettings.hasCompletedOnboarding = true
+    
+    return LauncherView(
+        clipboardManager: ClipboardManager.shared,
+        settings: previewSettings,
+        onClose: {},
+        onActivateItem: { _, _ in }
+    )
+    .frame(width: 750, height: 500)
+    .background(Color(red: 0.1, green: 0.1, blue: 0.15))
 }

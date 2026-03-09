@@ -16,6 +16,9 @@ final class AppSettings: ObservableObject {
     static let defaultToggleKeyCode = UInt32(kVK_ANSI_V)
     static let defaultToggleModifiers = UInt32(optionKey | cmdKey)
     static let defaultWindowOpacity = 0.92
+    static let defaultCommandVStripItemCount = 5
+    static let minCommandVStripItemCount = 2
+    static let maxCommandVStripItemCount = 10
 
     static let availableToggleKeys: [HotKeyChoice] = [
         HotKeyChoice(keyCode: UInt32(kVK_Space), label: "Space"),
@@ -75,6 +78,7 @@ final class AppSettings: ObservableObject {
         static let focusSearchOnOpen = "settings.focusSearchOnOpen"
         static let hasCompletedOnboarding = "settings.hasCompletedOnboarding"
         static let showLauncherOnStartup = "settings.showLauncherOnStartup"
+        static let commandVStripItemCount = "settings.commandVStripItemCount"
     }
 
     @Published var toggleKeyCode: UInt32 {
@@ -109,6 +113,17 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var commandVStripItemCount: Int {
+        didSet {
+            let clamped = Self.clampedCommandVStripItemCount(commandVStripItemCount)
+            if clamped != commandVStripItemCount {
+                commandVStripItemCount = clamped
+                return
+            }
+            UserDefaults.standard.set(commandVStripItemCount, forKey: Keys.commandVStripItemCount)
+        }
+    }
+
     private init() {
         let defaults = UserDefaults.standard
         let savedKeyCode = defaults.object(forKey: Keys.toggleKeyCode) != nil ? UInt32(defaults.integer(forKey: Keys.toggleKeyCode)) : nil
@@ -121,6 +136,9 @@ final class AppSettings: ObservableObject {
         focusSearchOnOpen = defaults.object(forKey: Keys.focusSearchOnOpen) as? Bool ?? true
         hasCompletedOnboarding = defaults.object(forKey: Keys.hasCompletedOnboarding) as? Bool ?? false
         showLauncherOnStartup = defaults.object(forKey: Keys.showLauncherOnStartup) as? Bool ?? true
+        let savedCommandVCount = defaults.integer(forKey: Keys.commandVStripItemCount)
+        let initialCommandVCount = savedCommandVCount > 0 ? savedCommandVCount : Self.defaultCommandVStripItemCount
+        commandVStripItemCount = Self.clampedCommandVStripItemCount(initialCommandVCount)
     }
 
     var toggleShortcutLabel: String {
@@ -155,6 +173,7 @@ final class AppSettings: ObservableObject {
         windowOpacity = Self.defaultWindowOpacity
         focusSearchOnOpen = true
         showLauncherOnStartup = true
+        commandVStripItemCount = Self.defaultCommandVStripItemCount
     }
 
     func completeOnboarding() {
@@ -185,5 +204,9 @@ final class AppSettings: ObservableObject {
 
     private static func sanitizedModifiers(_ modifiers: UInt32) -> UInt32 {
         modifiers == 0 ? defaultToggleModifiers : modifiers
+    }
+
+    private static func clampedCommandVStripItemCount(_ value: Int) -> Int {
+        min(max(value, minCommandVStripItemCount), maxCommandVStripItemCount)
     }
 }
