@@ -391,7 +391,7 @@ struct LauncherView: View {
                     .labelsHidden()
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Hold ⌥V popup items: \(settings.commandVStripItemCount)")
+                        Text("Long-press launcher hotkey items: \(settings.commandVStripItemCount)")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.white.opacity(0.75))
 

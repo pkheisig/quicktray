@@ -15,7 +15,7 @@ struct QuickTrayApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private static let commandVHoldDuration: TimeInterval = 1.0
+    private static let launcherHotKeyHoldDuration: TimeInterval = 1.0
 
     private let clipboardManager = ClipboardManager.shared
     private let settings = AppSettings.shared
@@ -23,10 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: LauncherPanelController?
     private var quickPasteStripController: QuickPasteStripController?
     private var cancellables: Set<AnyCancellable> = []
-    private var globalCommandVMonitor: Any?
-    private var localCommandVMonitor: Any?
-    private var commandVHoldTimer: Timer?
-    private var awaitingHeldCommandV = false
+    private var launcherHotKeyHoldTimer: Timer?
+    private var launcherHotKeyDidTriggerLongPress = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -36,7 +34,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureLauncherPanel()
         configureQuickPasteStrip()
-        configureCommandVHoldMonitoring()
         configureHotKeys()
         maybePresentLauncherOnStartup()
     }
@@ -46,17 +43,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        commandVHoldTimer?.invalidate()
-        commandVHoldTimer = nil
-
-        if let globalCommandVMonitor {
-            NSEvent.removeMonitor(globalCommandVMonitor)
-            self.globalCommandVMonitor = nil
-        }
-        if let localCommandVMonitor {
-            NSEvent.removeMonitor(localCommandVMonitor)
-            self.localCommandVMonitor = nil
-        }
+        launcherHotKeyHoldTimer?.invalidate()
+        launcherHotKeyHoldTimer = nil
     }
 
     private func configureStatusItem() {
@@ -158,10 +146,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotKeyManager.shared.register(
             id: 1,
             keyCode: settings.toggleKeyCode,
-            modifiers: settings.toggleModifiers
-        ) { [weak self] in
-            self?.toggleLauncher()
-        }
+            modifiers: settings.toggleModifiers,
+            onPress: { [weak self] in
+                self?.beginLauncherHotKeyPress()
+            },
+            onRelease: { [weak self] in
+                self?.endLauncherHotKeyPress()
+            }
+        )
     }
 
     private func maybePresentLauncherOnStartup() {
@@ -172,70 +164,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func configureCommandVHoldMonitoring() {
-        globalCommandVMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
-            self?.handleCommandVHoldEvent(event)
-        }
+    private func beginLauncherHotKeyPress() {
+        guard launcherHotKeyHoldTimer == nil else { return }
 
-        localCommandVMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
-            self?.handleCommandVHoldEvent(event)
-            return event
-        }
-    }
-
-    private func handleCommandVHoldEvent(_ event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-
-        switch event.type {
-        case .keyDown:
-            guard event.keyCode == UInt16(kVK_ANSI_V) else { return }
-            guard modifiers.contains(.option) else { return }
-            guard !modifiers.contains(.command), !modifiers.contains(.control), !modifiers.contains(.function), !modifiers.contains(.shift) else {
-                return
+        launcherHotKeyDidTriggerLongPress = false
+        launcherHotKeyHoldTimer = Timer.scheduledTimer(withTimeInterval: Self.launcherHotKeyHoldDuration, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            if self.presentQuickPasteStripFromLauncherHotKey() {
+                self.launcherHotKeyDidTriggerLongPress = true
+                self.panelController?.hide()
             }
-            beginCommandVHold()
-
-        case .keyUp:
-            if event.keyCode == UInt16(kVK_ANSI_V) {
-                cancelPendingCommandVHold()
-            }
-
-        case .flagsChanged:
-            if !modifiers.contains(.option) {
-                cancelPendingCommandVHold()
-            }
-
-        default:
-            break
         }
     }
 
-    private func beginCommandVHold() {
-        guard !awaitingHeldCommandV else { return }
-        guard quickPasteStripController?.isVisible != true else { return }
+    private func endLauncherHotKeyPress() {
+        launcherHotKeyHoldTimer?.invalidate()
+        launcherHotKeyHoldTimer = nil
 
-        awaitingHeldCommandV = true
-        commandVHoldTimer?.invalidate()
-        commandVHoldTimer = Timer.scheduledTimer(withTimeInterval: Self.commandVHoldDuration, repeats: false) { [weak self] _ in
-            self?.presentCommandVQuickPasteStripIfNeeded()
+        if launcherHotKeyDidTriggerLongPress {
+            launcherHotKeyDidTriggerLongPress = false
+            return
         }
+
+        if quickPasteStripController?.isVisible == true {
+            quickPasteStripController?.hide()
+        }
+        toggleLauncher()
     }
 
-    private func cancelPendingCommandVHold() {
-        awaitingHeldCommandV = false
-        commandVHoldTimer?.invalidate()
-        commandVHoldTimer = nil
-    }
-
-    private func presentCommandVQuickPasteStripIfNeeded() {
-        guard awaitingHeldCommandV else { return }
-        cancelPendingCommandVHold()
-
+    private func presentQuickPasteStripFromLauncherHotKey() -> Bool {
         let orderedItems = clipboardManager.items.sorted { $0.timestamp > $1.timestamp }
-        let limit = max(1, settings.commandVStripItemCount)
+        let limit = max(AppSettings.minCommandVStripItemCount, settings.commandVStripItemCount)
         let itemsToShow = Array(orderedItems.prefix(limit))
-        guard !itemsToShow.isEmpty else { return }
+        guard !itemsToShow.isEmpty else { return false }
 
-        quickPasteStripController?.show(items: itemsToShow)
+        quickPasteStripController?.show(items: itemsToShow, shortcutLabel: settings.toggleShortcutLabel)
+        return true
     }
 }

@@ -46,7 +46,7 @@ final class QuickPasteStripController: NSWindowController {
         panel.isVisible
     }
 
-    func show(items: [ClipboardItem]) {
+    func show(items: [ClipboardItem], shortcutLabel: String) {
         guard !items.isEmpty else {
             hide()
             return
@@ -55,6 +55,7 @@ final class QuickPasteStripController: NSWindowController {
         let rootView = QuickPasteStripView(
             clipboardManager: clipboardManager,
             items: items,
+            shortcutLabel: shortcutLabel,
             onChoose: { [weak self] item in
                 self?.hide()
                 self?.onChoose(item)
@@ -104,6 +105,7 @@ final class QuickPasteStripController: NSWindowController {
 private struct QuickPasteStripView: View {
     @ObservedObject var clipboardManager: ClipboardManager
     let items: [ClipboardItem]
+    let shortcutLabel: String
     let onChoose: (ClipboardItem) -> Void
     let onClose: () -> Void
 
@@ -118,7 +120,7 @@ private struct QuickPasteStripView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text("Hold Option+V chooser")
+                    Text("Hold \(shortcutLabel) chooser")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.68))
                     Spacer()
