@@ -60,6 +60,7 @@ final class QuickPasteStripController: NSWindowController {
                 self?.hide()
                 self?.onChoose(item)
             },
+            onStartDrag: {},
             onClose: { [weak self] in
                 self?.hide()
             }
@@ -107,6 +108,7 @@ private struct QuickPasteStripView: View {
     let items: [ClipboardItem]
     let shortcutLabel: String
     let onChoose: (ClipboardItem) -> Void
+    let onStartDrag: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -140,6 +142,7 @@ private struct QuickPasteStripView: View {
                             QuickPasteStripTile(
                                 item: item,
                                 previewImage: clipboardManager.previewImage(for: item),
+                                onStartDrag: onStartDrag,
                                 onChoose: { onChoose(item) }
                             )
                         }
@@ -155,6 +158,7 @@ private struct QuickPasteStripView: View {
 private struct QuickPasteStripTile: View {
     let item: ClipboardItem
     let previewImage: NSImage?
+    let onStartDrag: () -> Void
     let onChoose: () -> Void
 
     var body: some View {
@@ -189,6 +193,10 @@ private struct QuickPasteStripTile: View {
             .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .onDrag {
+            onStartDrag()
+            return item.dragItemProvider() ?? NSItemProvider()
+        }
     }
 
     private var iconName: String {

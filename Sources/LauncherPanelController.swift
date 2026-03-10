@@ -18,7 +18,7 @@ final class LauncherPanelController: NSWindowController {
         self.settings = settings
 
         let panel = FloatingLauncherPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 750, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false

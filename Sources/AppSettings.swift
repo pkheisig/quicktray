@@ -19,6 +19,9 @@ final class AppSettings: ObservableObject {
     static let defaultCommandVStripItemCount = 5
     static let minCommandVStripItemCount = 2
     static let maxCommandVStripItemCount = 10
+    static let defaultLauncherHoldDuration = 1.0
+    static let minLauncherHoldDuration = 0.2
+    static let maxLauncherHoldDuration = 1.8
 
     static let availableToggleKeys: [HotKeyChoice] = [
         HotKeyChoice(keyCode: UInt32(kVK_Space), label: "Space"),
@@ -79,6 +82,7 @@ final class AppSettings: ObservableObject {
         static let hasCompletedOnboarding = "settings.hasCompletedOnboarding"
         static let showLauncherOnStartup = "settings.showLauncherOnStartup"
         static let commandVStripItemCount = "settings.commandVStripItemCount"
+        static let launcherHoldDuration = "settings.launcherHoldDuration"
     }
 
     @Published var toggleKeyCode: UInt32 {
@@ -124,6 +128,17 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var launcherHoldDuration: Double {
+        didSet {
+            let clamped = Self.clampedLauncherHoldDuration(launcherHoldDuration)
+            if clamped != launcherHoldDuration {
+                launcherHoldDuration = clamped
+                return
+            }
+            UserDefaults.standard.set(launcherHoldDuration, forKey: Keys.launcherHoldDuration)
+        }
+    }
+
     private init() {
         let defaults = UserDefaults.standard
         let savedKeyCode = defaults.object(forKey: Keys.toggleKeyCode) != nil ? UInt32(defaults.integer(forKey: Keys.toggleKeyCode)) : nil
@@ -139,6 +154,8 @@ final class AppSettings: ObservableObject {
         let savedCommandVCount = defaults.integer(forKey: Keys.commandVStripItemCount)
         let initialCommandVCount = savedCommandVCount > 0 ? savedCommandVCount : Self.defaultCommandVStripItemCount
         commandVStripItemCount = Self.clampedCommandVStripItemCount(initialCommandVCount)
+        let savedHoldDuration = defaults.object(forKey: Keys.launcherHoldDuration) as? Double
+        launcherHoldDuration = Self.clampedLauncherHoldDuration(savedHoldDuration ?? Self.defaultLauncherHoldDuration)
     }
 
     var toggleShortcutLabel: String {
@@ -174,6 +191,7 @@ final class AppSettings: ObservableObject {
         focusSearchOnOpen = true
         showLauncherOnStartup = true
         commandVStripItemCount = Self.defaultCommandVStripItemCount
+        launcherHoldDuration = Self.defaultLauncherHoldDuration
     }
 
     func completeOnboarding() {
@@ -208,5 +226,9 @@ final class AppSettings: ObservableObject {
 
     private static func clampedCommandVStripItemCount(_ value: Int) -> Int {
         min(max(value, minCommandVStripItemCount), maxCommandVStripItemCount)
+    }
+
+    private static func clampedLauncherHoldDuration(_ value: Double) -> Double {
+        min(max(value, minLauncherHoldDuration), maxLauncherHoldDuration)
     }
 }

@@ -103,6 +103,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     var imageData: Data?
     var imageDiskPath: String?
     var filePath: String?
+    var imageWidth: Double?
+    var imageHeight: Double?
+    var richTextData: Data?
+    var htmlData: Data?
+    var capturedTypeIdentifiers: [String]
+    var sensitivityLabels: [String]
+    var privacyMode: ClipboardPrivacyMode
     var sourceApplicationName: String?
     var sourceBundleIdentifier: String?
     var timestamp: Date
@@ -123,10 +130,34 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         }
         guard let payload = imagePayloadData else { return nil }
         let image = NSImage(data: payload)
+        cacheImageMetadata(from: image)
         if imageData != nil {
             cachedImage = image
         }
         return image
+    }
+
+    var imageDimensions: NSSize? {
+        guard kind == .image else { return nil }
+        if let imageWidth, let imageHeight {
+            return NSSize(width: imageWidth, height: imageHeight)
+        }
+        if let cachedImage {
+            cacheImageMetadata(from: cachedImage)
+            return cachedImage.size
+        }
+        guard let payload = imagePayloadData else { return nil }
+        if let imageRep = NSBitmapImageRep(data: payload) {
+            let size = imageRep.size
+            imageWidth = Double(size.width)
+            imageHeight = Double(size.height)
+            return size
+        }
+        if let image = NSImage(data: payload) {
+            cacheImageMetadata(from: image)
+            return image.size
+        }
+        return nil
     }
 
     var imagePayloadData: Data? {
@@ -178,8 +209,9 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
             }
             return String(trimmed.prefix(220))
         case .image:
-            let width = Int(imageContent?.size.width ?? 0)
-            let height = Int(imageContent?.size.height ?? 0)
+            let size = imageDimensions ?? .zero
+            let width = Int(size.width)
+            let height = Int(size.height)
             return "\(width) × \(height)"
         case .file:
             if let fileURL {
@@ -205,7 +237,6 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
             }
             let isDocument = type.conforms(to: UTType.text)
                 || type.conforms(to: UTType.pdf)
-                || type.conforms(to: UTType.content)
                 || type.identifier.contains("spreadsheet")
                 || type.identifier.contains("presentation")
                 || type.identifier.contains("wordprocessing")
@@ -242,7 +273,12 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         let sourceText = sourceApplicationName ?? ""
         switch kind {
         case .text:
-            return [title, textContent ?? "", sourceText].joined(separator: " ")
+            let isProtected = !sensitivityLabels.isEmpty || privacyMode == .masked
+            let titleValue = isProtected ? "hidden text clip" : title
+            let textValue = !isProtected
+                ? (textContent ?? "")
+                : sensitivityLabels.joined(separator: " ")
+            return [titleValue, textValue, sourceText].joined(separator: " ")
         case .image:
             return [title, detailText, fileTypeToken, sourceText].joined(separator: " ")
         case .file:
@@ -262,6 +298,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         case imageData
         case imageDiskPath
         case filePath
+        case imageWidth
+        case imageHeight
+        case richTextData
+        case htmlData
+        case capturedTypeIdentifiers
+        case sensitivityLabels
+        case privacyMode
         case sourceApplicationName
         case sourceBundleIdentifier
         case timestamp
@@ -270,6 +313,11 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
 
     init(
         text: String,
+        richTextData: Data? = nil,
+        htmlData: Data? = nil,
+        capturedTypeIdentifiers: [String] = [],
+        sensitivityLabels: [String] = [],
+        privacyMode: ClipboardPrivacyMode = .standard,
         sourceApplicationName: String? = nil,
         sourceBundleIdentifier: String? = nil
     ) {
@@ -279,6 +327,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         imageData = nil
         imageDiskPath = nil
         filePath = nil
+        imageWidth = nil
+        imageHeight = nil
+        self.richTextData = richTextData
+        self.htmlData = htmlData
+        self.capturedTypeIdentifiers = capturedTypeIdentifiers
+        self.sensitivityLabels = sensitivityLabels
+        self.privacyMode = privacyMode
         self.sourceApplicationName = sourceApplicationName
         self.sourceBundleIdentifier = sourceBundleIdentifier
         timestamp = Date()
@@ -293,6 +348,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         imageData = try container.decodeIfPresent(Data.self, forKey: .imageData)
         imageDiskPath = try container.decodeIfPresent(String.self, forKey: .imageDiskPath)
         filePath = try container.decodeIfPresent(String.self, forKey: .filePath)
+        imageWidth = try container.decodeIfPresent(Double.self, forKey: .imageWidth)
+        imageHeight = try container.decodeIfPresent(Double.self, forKey: .imageHeight)
+        richTextData = try container.decodeIfPresent(Data.self, forKey: .richTextData)
+        htmlData = try container.decodeIfPresent(Data.self, forKey: .htmlData)
+        capturedTypeIdentifiers = try container.decodeIfPresent([String].self, forKey: .capturedTypeIdentifiers) ?? []
+        sensitivityLabels = try container.decodeIfPresent([String].self, forKey: .sensitivityLabels) ?? []
+        privacyMode = try container.decodeIfPresent(ClipboardPrivacyMode.self, forKey: .privacyMode) ?? .standard
         sourceApplicationName = try container.decodeIfPresent(String.self, forKey: .sourceApplicationName)
         sourceBundleIdentifier = try container.decodeIfPresent(String.self, forKey: .sourceBundleIdentifier)
         timestamp = try container.decode(Date.self, forKey: .timestamp)
@@ -309,6 +371,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         try container.encodeIfPresent(imageData, forKey: .imageData)
         try container.encodeIfPresent(imageDiskPath, forKey: .imageDiskPath)
         try container.encodeIfPresent(filePath, forKey: .filePath)
+        try container.encodeIfPresent(imageWidth, forKey: .imageWidth)
+        try container.encodeIfPresent(imageHeight, forKey: .imageHeight)
+        try container.encodeIfPresent(richTextData, forKey: .richTextData)
+        try container.encodeIfPresent(htmlData, forKey: .htmlData)
+        try container.encode(capturedTypeIdentifiers, forKey: .capturedTypeIdentifiers)
+        try container.encode(sensitivityLabels, forKey: .sensitivityLabels)
+        try container.encode(privacyMode, forKey: .privacyMode)
         try container.encodeIfPresent(sourceApplicationName, forKey: .sourceApplicationName)
         try container.encodeIfPresent(sourceBundleIdentifier, forKey: .sourceBundleIdentifier)
         try container.encode(timestamp, forKey: .timestamp)
@@ -317,6 +386,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
 
     init(
         imageData: Data,
+        capturedTypeIdentifiers: [String] = [],
+        privacyMode: ClipboardPrivacyMode = .standard,
         sourceApplicationName: String? = nil,
         sourceBundleIdentifier: String? = nil
     ) {
@@ -326,6 +397,14 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         self.imageData = imageData
         imageDiskPath = nil
         filePath = nil
+        let imageSize = Self.imageSize(from: imageData)
+        imageWidth = imageSize.map { Double($0.width) }
+        imageHeight = imageSize.map { Double($0.height) }
+        richTextData = nil
+        htmlData = nil
+        self.capturedTypeIdentifiers = capturedTypeIdentifiers
+        sensitivityLabels = []
+        self.privacyMode = privacyMode
         self.sourceApplicationName = sourceApplicationName
         self.sourceBundleIdentifier = sourceBundleIdentifier
         timestamp = Date()
@@ -335,6 +414,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
 
     init(
         fileURL: URL,
+        capturedTypeIdentifiers: [String] = [],
+        privacyMode: ClipboardPrivacyMode = .standard,
         sourceApplicationName: String? = nil,
         sourceBundleIdentifier: String? = nil
     ) {
@@ -344,6 +425,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         imageData = nil
         imageDiskPath = nil
         filePath = fileURL.path
+        imageWidth = nil
+        imageHeight = nil
+        richTextData = nil
+        htmlData = nil
+        self.capturedTypeIdentifiers = capturedTypeIdentifiers
+        sensitivityLabels = []
+        self.privacyMode = privacyMode
         self.sourceApplicationName = sourceApplicationName
         self.sourceBundleIdentifier = sourceBundleIdentifier
         timestamp = Date()
@@ -391,6 +479,20 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         cachedImage = nil
     }
 
+    private func cacheImageMetadata(from image: NSImage?) {
+        guard let image else { return }
+        let size = image.size
+        imageWidth = Double(size.width)
+        imageHeight = Double(size.height)
+    }
+
+    private static func imageSize(from data: Data) -> NSSize? {
+        if let imageRep = NSBitmapImageRep(data: data) {
+            return imageRep.size
+        }
+        return NSImage(data: data)?.size
+    }
+
     func snapshot(omitImageData: Bool = false) -> ClipboardItem {
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -412,6 +514,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
 }
 
 private enum PreviewFactory {
+    private static let quickLookTimeout: DispatchTime = .now() + 1.2
+
     static func previewImage(for item: ClipboardItem) -> NSImage? {
         guard let fileURL = item.fileURL else { return nil }
 
@@ -444,7 +548,7 @@ private enum PreviewFactory {
             )
         }
 
-        semaphore.wait()
+        _ = semaphore.wait(timeout: quickLookTimeout)
         return resultImage
     }
 
@@ -466,12 +570,16 @@ final class ClipboardManager: ObservableObject {
 
     private static let retentionLimitKey = "unpinnedRetentionLimit"
     private static let monitoringEnabledKey = "clipboardMonitoringEnabled"
+    private static let preferredPasteModeKey = "preferredPasteMode"
+    private static let maskSensitiveClipsKey = "maskSensitiveClips"
+    private static let appRulesKey = "clipboardAppRules"
     private static let defaultUnpinnedRetentionLimit = 30
     private static let minUnpinnedRetentionLimit = 1
     private static let maxUnpinnedRetentionLimit = 500
     private static let imageRAMItemLimit = 20
     private static let stackPasteTimeout: TimeInterval = 45
     private static let stackCaptureWindow: TimeInterval = 15 * 60
+    private static let secureSourceGraceInterval: TimeInterval = 1.25
     private static let secureBundleBlacklist: Set<String> = [
         "com.1password.1password",
         "com.1password.1password7",
@@ -483,6 +591,17 @@ final class ClipboardManager: ObservableObject {
         "bitwarden",
         "keychain access"
     ]
+    private static let sensitivePasteboardTypes: Set<NSPasteboard.PasteboardType> = [
+        NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"),
+        NSPasteboard.PasteboardType("org.nspasteboard.TransientType"),
+        NSPasteboard.PasteboardType("org.nspasteboard.AutoGeneratedType")
+    ]
+
+    private struct SourceApplicationSnapshot {
+        let name: String?
+        let bundleIdentifier: String?
+        let observedAt: Date
+    }
 
     @Published var unpinnedRetentionLimit: Int {
         didSet {
@@ -533,6 +652,24 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
+    @Published var preferredPasteMode: ClipboardPasteMode {
+        didSet {
+            UserDefaults.standard.set(preferredPasteMode.rawValue, forKey: Self.preferredPasteModeKey)
+        }
+    }
+
+    @Published var maskSensitiveClips: Bool {
+        didSet {
+            UserDefaults.standard.set(maskSensitiveClips, forKey: Self.maskSensitiveClipsKey)
+        }
+    }
+
+    @Published var appRules: [AppClipboardRule] {
+        didSet {
+            saveAppRules()
+        }
+    }
+
     @Published var displayMode: ClipboardDisplayMode = .list
     @Published private(set) var displayedItems: [ClipboardItem] = []
     @Published private(set) var previewImages: [UUID: NSImage] = [:]
@@ -544,10 +681,16 @@ final class ClipboardManager: ObservableObject {
     private var historyRevision = 0
     private var lastActivatedItemID: UUID?
     private var stackQueue: [UUID] = []
+    private var usesCustomStackQueue = false
     private var stackCursor = 0
     private var stackQueueRevision = -1
     private var lastStackPasteDate: Date?
     private var sourceAppIconCache: [String: NSImage] = [:]
+    private var lastObservedSourceApplication: SourceApplicationSnapshot?
+    private var pendingPasteTargetProcessIdentifier: pid_t?
+    private var previewLoadsInFlight: Set<UUID> = []
+    private let targetActivationPollInterval: TimeInterval = 0.01
+    private let targetActivationMaxAttempts = 4
 
     private static func clampedRetentionLimit(_ value: Int) -> Int {
         min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
@@ -579,6 +722,9 @@ final class ClipboardManager: ObservableObject {
         let initialLimit = savedLimit > 0 ? savedLimit : Self.defaultUnpinnedRetentionLimit
         unpinnedRetentionLimit = Self.clampedRetentionLimit(initialLimit)
         isMonitoringEnabled = UserDefaults.standard.object(forKey: Self.monitoringEnabledKey) as? Bool ?? true
+        preferredPasteMode = ClipboardPasteMode(rawValue: UserDefaults.standard.string(forKey: Self.preferredPasteModeKey) ?? "") ?? .rich
+        maskSensitiveClips = UserDefaults.standard.object(forKey: Self.maskSensitiveClipsKey) as? Bool ?? true
+        appRules = Self.loadPersistedAppRules()
         lastChangeCount = pasteboard.changeCount
 
         loadItems()
@@ -600,9 +746,16 @@ final class ClipboardManager: ObservableObject {
         return visibleItems[0].id
     }
 
+    func capturePasteTargetApplication(_ application: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
+        guard let application else { return }
+        guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        pendingPasteTargetProcessIdentifier = application.processIdentifier
+    }
+
     func sourceAppIcon(for item: ClipboardItem) -> NSImage? {
         if let bundleIdentifier = item.sourceBundleIdentifier {
-            if let cachedIcon = sourceAppIconCache[bundleIdentifier] {
+            let cacheKey = "bundle:\(bundleIdentifier)"
+            if let cachedIcon = sourceAppIconCache[cacheKey] {
                 return cachedIcon
             }
 
@@ -616,13 +769,71 @@ final class ClipboardManager: ObservableObject {
 
             if let icon {
                 icon.size = NSSize(width: 14, height: 14)
-                sourceAppIconCache[bundleIdentifier] = icon
+                sourceAppIconCache[cacheKey] = icon
                 return icon
             }
         }
 
         guard let sourceName = item.sourceApplicationName else { return nil }
-        return NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == sourceName })?.icon
+        let cacheKey = "name:\(sourceName.lowercased())"
+        if let cachedIcon = sourceAppIconCache[cacheKey] {
+            return cachedIcon
+        }
+
+        guard let icon = NSWorkspace.shared.runningApplications
+            .first(where: { $0.localizedName == sourceName })?.icon else {
+            return nil
+        }
+        icon.size = NSSize(width: 14, height: 14)
+        sourceAppIconCache[cacheKey] = icon
+        return icon
+    }
+
+    var configuredApplications: [SourceApplicationSummary] {
+        var lookup: [String: SourceApplicationSummary] = [:]
+
+        for rule in appRules {
+            lookup[rule.bundleIdentifier] = SourceApplicationSummary(
+                bundleIdentifier: rule.bundleIdentifier,
+                applicationName: rule.applicationName,
+                clipCount: 0,
+                behavior: rule.behavior
+            )
+        }
+
+        for item in items {
+            guard let bundleIdentifier = item.sourceBundleIdentifier,
+                  let applicationName = item.sourceApplicationName,
+                  !bundleIdentifier.isEmpty,
+                  !applicationName.isEmpty else {
+                continue
+            }
+
+            let behavior = appRules.first(where: { $0.bundleIdentifier == bundleIdentifier })?.behavior ?? .save
+            var summary = lookup[bundleIdentifier] ?? SourceApplicationSummary(
+                bundleIdentifier: bundleIdentifier,
+                applicationName: applicationName,
+                clipCount: 0,
+                behavior: behavior
+            )
+            summary.applicationName = applicationName
+            summary.clipCount += 1
+            summary.behavior = behavior
+            lookup[bundleIdentifier] = summary
+        }
+
+        return lookup.values.sorted {
+            if $0.clipCount != $1.clipCount {
+                return $0.clipCount > $1.clipCount
+            }
+            return $0.applicationName.localizedCaseInsensitiveCompare($1.applicationName) == .orderedAscending
+        }
+    }
+
+    var pasteStackItems: [ClipboardItem] {
+        stackQueue.compactMap { itemID in
+            items.first(where: { $0.id == itemID })
+        }
     }
 
     var availableFileTypeFilters: [String] {
@@ -649,15 +860,40 @@ final class ClipboardManager: ObservableObject {
     }
 
     func checkClipboard() {
+        let now = Date()
+        let currentSourceApplication = SourceApplicationSnapshot(
+            name: NSWorkspace.shared.frontmostApplication?.localizedName,
+            bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+            observedAt: now
+        )
+        defer {
+            lastObservedSourceApplication = currentSourceApplication
+        }
+
         guard pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
 
-        let sourceApplication = NSWorkspace.shared.frontmostApplication
-        let sourceName = sourceApplication?.localizedName
+        if Self.containsSensitivePasteboardMetadata(in: pasteboard) {
+            return
+        }
+
+        let sourceApplication = resolvedSourceApplication(
+            current: currentSourceApplication,
+            now: now
+        )
+        let sourceName = sourceApplication?.name
         let sourceBundleIdentifier = sourceApplication?.bundleIdentifier
         if Self.isSecureSourceApplication(name: sourceName, bundleIdentifier: sourceBundleIdentifier) {
             return
         }
+
+        let ruleBehavior = captureBehavior(for: sourceName, bundleIdentifier: sourceBundleIdentifier)
+        if ruleBehavior == .ignore {
+            return
+        }
+
+        let capturedTypes = (pasteboard.types ?? []).map(\.rawValue)
+        let privacyMode: ClipboardPrivacyMode = ruleBehavior == .mask ? .masked : .standard
 
         let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL],
@@ -666,6 +902,8 @@ final class ClipboardManager: ObservableObject {
                 addItem(
                     ClipboardItem(
                         fileURL: fileURL,
+                        capturedTypeIdentifiers: capturedTypes,
+                        privacyMode: privacyMode,
                         sourceApplicationName: sourceName,
                         sourceBundleIdentifier: sourceBundleIdentifier
                     )
@@ -679,6 +917,8 @@ final class ClipboardManager: ObservableObject {
             addItem(
                 ClipboardItem(
                     imageData: imageData,
+                    capturedTypeIdentifiers: capturedTypes,
+                    privacyMode: privacyMode,
                     sourceApplicationName: sourceName,
                     sourceBundleIdentifier: sourceBundleIdentifier
                 )
@@ -686,10 +926,20 @@ final class ClipboardManager: ObservableObject {
             return
         }
 
-        if let string = pasteboard.string(forType: .string) {
+        let rtfData = pasteboard.data(forType: .rtf)
+        let htmlData = pasteboard.data(forType: .html)
+        let plainString = pasteboard.string(forType: .string)
+            ?? Self.extractStringFromRichPayload(rtfData: rtfData, htmlData: htmlData)
+
+        if let string = plainString {
             addItem(
                 ClipboardItem(
                     text: string,
+                    richTextData: rtfData,
+                    htmlData: htmlData,
+                    capturedTypeIdentifiers: capturedTypes,
+                    sensitivityLabels: SensitiveDataDetector.findings(in: string),
+                    privacyMode: privacyMode,
                     sourceApplicationName: sourceName,
                     sourceBundleIdentifier: sourceBundleIdentifier
                 )
@@ -708,7 +958,9 @@ final class ClipboardManager: ObservableObject {
         items.removeAll()
         previewImages.removeAll()
         stackQueue = []
+        usesCustomStackQueue = false
         stackCursor = 0
+        previewLoadsInFlight.removeAll()
     }
 
     func removeItem(id: UUID) {
@@ -716,13 +968,17 @@ final class ClipboardManager: ObservableObject {
             removeImagePayload(for: item)
         }
         items.removeAll { $0.id == id }
+        stackQueue.removeAll { $0 == id }
+        stackCursor = min(stackCursor, max(stackQueue.count - 1, 0))
         previewImages[id] = nil
+        previewLoadsInFlight.remove(id)
     }
 
     func copyToClipboard(
         item: ClipboardItem,
         shouldPaste: Bool = false,
         asPlainText: Bool = false,
+        pasteMode: ClipboardPasteMode? = nil,
         refreshHistoryEntry: Bool = true
     ) {
         if asPlainText {
@@ -741,9 +997,7 @@ final class ClipboardManager: ObservableObject {
 
         switch item.kind {
         case .text:
-            if let textContent = item.textContent {
-                pasteboard.setString(textContent, forType: .string)
-            }
+            writeTextItemToPasteboard(item, mode: pasteMode ?? preferredPasteMode)
         case .image:
             if let imagePayload = item.imagePayloadData {
                 pasteboard.setData(imagePayload, forType: .tiff)
@@ -763,15 +1017,28 @@ final class ClipboardManager: ObservableObject {
         }
 
         guard shouldPaste else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            Self.issuePasteShortcut()
-        }
+        schedulePasteShortcut()
     }
 
     func quickPasteRecent(offsetFromLatest offset: Int) {
         let recentItems = items.sorted { $0.timestamp > $1.timestamp }
         guard recentItems.indices.contains(offset) else { return }
         copyToClipboard(item: recentItems[offset], shouldPaste: true)
+    }
+
+    func enqueueForPasteStack(_ item: ClipboardItem) {
+        guard !stackQueue.contains(item.id) else { return }
+        usesCustomStackQueue = true
+        stackQueue.append(item.id)
+        stackQueueRevision = historyRevision
+    }
+
+    func clearPasteStack() {
+        stackQueue = []
+        usesCustomStackQueue = false
+        stackCursor = 0
+        stackQueueRevision = historyRevision
+        lastStackPasteDate = nil
     }
 
     func pasteNextStackItem() {
@@ -801,13 +1068,14 @@ final class ClipboardManager: ObservableObject {
             .sorted { $0.timestamp > $1.timestamp }
             .first
 
-        guard
-            let recentImage,
-            let image = recentImage.imageContent,
-            let cgImage = cgImage(from: image)
-        else {
-            return
-        }
+        guard let recentImage else { return }
+        extractText(from: recentImage, shouldPaste: shouldPaste)
+    }
+
+    func extractText(from item: ClipboardItem, shouldPaste: Bool = false) {
+        guard item.kind == .image,
+              let image = item.imageContent,
+              let cgImage = cgImage(from: image) else { return }
 
         let request = VNRecognizeTextRequest { [weak self] request, _ in
             guard let self else { return }
@@ -874,6 +1142,7 @@ final class ClipboardManager: ObservableObject {
         _ text: String,
         shouldPaste: Bool = false,
         addToHistory: Bool = true,
+        privacyMode: ClipboardPrivacyMode = .standard,
         sourceApplicationName: String? = nil,
         sourceBundleIdentifier: String? = nil
     ) {
@@ -884,6 +1153,9 @@ final class ClipboardManager: ObservableObject {
         if addToHistory {
             let item = ClipboardItem(
                 text: text,
+                capturedTypeIdentifiers: [NSPasteboard.PasteboardType.string.rawValue],
+                sensitivityLabels: SensitiveDataDetector.findings(in: text),
+                privacyMode: privacyMode,
                 sourceApplicationName: sourceApplicationName,
                 sourceBundleIdentifier: sourceBundleIdentifier
             )
@@ -892,18 +1164,109 @@ final class ClipboardManager: ObservableObject {
         }
 
         guard shouldPaste else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-            Self.issuePasteShortcut()
-        }
+        schedulePasteShortcut()
     }
 
     func toggleMonitoring() {
         isMonitoringEnabled.toggle()
     }
 
+    func updateRule(for application: SourceApplicationSummary, behavior: ClipboardAppRuleBehavior) {
+        if let existingIndex = appRules.firstIndex(where: { $0.bundleIdentifier == application.bundleIdentifier }) {
+            appRules[existingIndex].applicationName = application.applicationName
+            appRules[existingIndex].behavior = behavior
+        } else {
+            appRules.append(
+                AppClipboardRule(
+                    bundleIdentifier: application.bundleIdentifier,
+                    applicationName: application.applicationName,
+                    behavior: behavior
+                )
+            )
+        }
+    }
+
+    func shouldMaskDisplay(of item: ClipboardItem) -> Bool {
+        item.privacyMode == .masked || (maskSensitiveClips && !item.sensitivityLabels.isEmpty)
+    }
+
+    func sensitivitySummary(for item: ClipboardItem) -> [String] {
+        if item.privacyMode == .masked && item.sensitivityLabels.isEmpty {
+            return ["Masked by app rule"]
+        }
+        if item.privacyMode == .masked {
+            return ["Masked by app rule"] + item.sensitivityLabels
+        }
+        return item.sensitivityLabels
+    }
+
+    func displayTitle(for item: ClipboardItem) -> String {
+        guard shouldMaskDisplay(of: item), item.kind == .text else { return item.title }
+        if let sourceName = item.sourceApplicationName, !sourceName.isEmpty {
+            return "Hidden text from \(sourceName)"
+        }
+        return "Hidden sensitive text"
+    }
+
+    func displayDetail(for item: ClipboardItem) -> String {
+        guard shouldMaskDisplay(of: item), item.kind == .text else { return item.detailText }
+        let labels = sensitivitySummary(for: item)
+        if labels.isEmpty {
+            return "Sensitive content hidden from the history list"
+        }
+        return labels.joined(separator: " • ")
+    }
+
+    func maskedTextPreview(for item: ClipboardItem) -> String? {
+        guard item.kind == .text, let text = item.textContent else { return nil }
+        guard shouldMaskDisplay(of: item) else { return text }
+        return String(repeating: "•", count: min(max(text.count, 18), 72))
+    }
+
+    func inspection(for item: ClipboardItem) -> ClipboardInspection {
+        let primaryPayload = inspectionPayload(for: item)
+        var summary: [ClipboardInspectionField] = [
+            ClipboardInspectionField(label: "Kind", value: item.kind.rawValue.capitalized),
+            ClipboardInspectionField(label: "Source", value: item.sourceApplicationName ?? "Unknown"),
+            ClipboardInspectionField(label: "Stored", value: item.timestamp.formatted(date: .abbreviated, time: .shortened))
+        ]
+
+        switch item.kind {
+        case .text:
+            let textValue = item.textContent ?? ""
+            summary.append(ClipboardInspectionField(label: "Characters", value: "\(textValue.count)"))
+            summary.append(ClipboardInspectionField(label: "UTF-8 bytes", value: "\(textValue.utf8.count)"))
+            summary.append(ClipboardInspectionField(label: "ANSI escapes", value: SensitiveDataDetector.containsANSIEscapes(in: textValue) ? "Yes" : "No"))
+            summary.append(ClipboardInspectionField(label: "Rich payload", value: item.richTextData != nil ? "RTF captured" : "Plain only"))
+            if item.htmlData != nil {
+                summary.append(ClipboardInspectionField(label: "HTML payload", value: "Captured"))
+            }
+        case .image:
+            let byteCount = item.imagePayloadData?.count ?? 0
+            summary.append(ClipboardInspectionField(label: "Image bytes", value: Self.byteCountFormatter.string(fromByteCount: Int64(byteCount))))
+            summary.append(ClipboardInspectionField(label: "Preview", value: item.detailText))
+        case .file:
+            summary.append(ClipboardInspectionField(label: "Path", value: item.fileURL?.path ?? "Unavailable"))
+            if let type = item.contentType?.identifier {
+                summary.append(ClipboardInspectionField(label: "Type", value: type))
+            }
+        }
+
+        return ClipboardInspection(
+            summary: summary,
+            typeIdentifiers: item.capturedTypeIdentifiers,
+            sensitivityFlags: sensitivitySummary(for: item),
+            hexPreview: Self.hexString(from: primaryPayload)
+        )
+    }
+
     func updateText(for id: UUID, newValue: String) {
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         items[index].textContent = newValue
+        items[index].richTextData = nil
+        items[index].htmlData = nil
+        items[index].capturedTypeIdentifiers = [NSPasteboard.PasteboardType.string.rawValue]
+        items[index].sensitivityLabels = SensitiveDataDetector.findings(in: newValue)
         items[index].timestamp = Date()
         items = items
     }
@@ -916,16 +1279,20 @@ final class ClipboardManager: ObservableObject {
     }
 
     func previewImage(for item: ClipboardItem) -> NSImage? {
+        if let image = previewImages[item.id] {
+            return image
+        }
+
         switch item.kind {
-        case .image:
-            return item.imageContent
         case .text:
             return nil
-        case .file:
-            if let image = previewImages[item.id] {
-                return image
+        case .image:
+            if let inMemoryImage = item.imageData != nil ? item.imageContent : nil {
+                return inMemoryImage
             }
-
+            loadPreview(for: item)
+            return nil
+        case .file:
             loadPreview(for: item)
             return nil
         }
@@ -943,8 +1310,6 @@ final class ClipboardManager: ObservableObject {
 
     @discardableResult
     private func addItem(_ item: ClipboardItem, refreshTimestamp: Bool = false) -> ClipboardItem {
-        persistImagePayloadIfNeeded(for: item)
-
         if let existingIndex = items.firstIndex(where: { $0.matchesSamePayload(as: item) }) {
             let existingItem = items[existingIndex]
             if refreshTimestamp {
@@ -956,6 +1321,21 @@ final class ClipboardManager: ObservableObject {
             if existingItem.sourceBundleIdentifier == nil {
                 existingItem.sourceBundleIdentifier = item.sourceBundleIdentifier
             }
+            if existingItem.richTextData == nil {
+                existingItem.richTextData = item.richTextData
+            }
+            if existingItem.htmlData == nil {
+                existingItem.htmlData = item.htmlData
+            }
+            if existingItem.capturedTypeIdentifiers.isEmpty {
+                existingItem.capturedTypeIdentifiers = item.capturedTypeIdentifiers
+            }
+            if existingItem.sensitivityLabels.isEmpty {
+                existingItem.sensitivityLabels = item.sensitivityLabels
+            }
+            if item.privacyMode == .masked {
+                existingItem.privacyMode = .masked
+            }
             persistImagePayloadIfNeeded(for: existingItem)
             items = items
             loadPreview(for: existingItem)
@@ -966,6 +1346,7 @@ final class ClipboardManager: ObservableObject {
             item.timestamp = Date()
         }
 
+        persistImagePayloadIfNeeded(for: item)
         items.append(item)
         trimUnpinnedItemsToLimit()
         loadPreview(for: item)
@@ -1083,22 +1464,67 @@ final class ClipboardManager: ObservableObject {
     }
 
     private func loadInitialPreviews() {
-        for item in items {
+        for item in sortedItems().prefix(12) where item.kind != .text {
             loadPreview(for: item)
         }
     }
 
     private func loadPreview(for item: ClipboardItem) {
-        guard item.kind == .file else { return }
+        guard item.kind != .text else { return }
         guard previewImages[item.id] == nil else { return }
+        guard !previewLoadsInFlight.contains(item.id) else { return }
+        previewLoadsInFlight.insert(item.id)
 
         previewQueue.async { [weak self] in
             guard let self else { return }
-            let image = PreviewFactory.previewImage(for: item)
-            guard let image else { return }
-            DispatchQueue.main.async {
-                self.previewImages[item.id] = image
+            let image: NSImage?
+            switch item.kind {
+            case .text:
+                image = nil
+            case .image:
+                image = item.imagePayloadData.flatMap(NSImage.init(data:))
+            case .file:
+                image = PreviewFactory.previewImage(for: item)
             }
+            DispatchQueue.main.async {
+                self.previewLoadsInFlight.remove(item.id)
+                if let image {
+                    self.previewImages[item.id] = image
+                }
+            }
+        }
+    }
+
+    private func schedulePasteShortcut() {
+        guard let processIdentifier = pendingPasteTargetProcessIdentifier else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                Self.issuePasteShortcut(targetProcessIdentifier: nil)
+            }
+            return
+        }
+
+        restorePendingPasteTargetApplication()
+        waitForPasteTargetAndPaste(processIdentifier: processIdentifier, attemptsRemaining: targetActivationMaxAttempts)
+    }
+
+    private func restorePendingPasteTargetApplication() {
+        guard let processIdentifier = pendingPasteTargetProcessIdentifier else { return }
+        guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return }
+        application.activate(options: [.activateIgnoringOtherApps])
+    }
+
+    private func waitForPasteTargetAndPaste(processIdentifier: pid_t, attemptsRemaining: Int) {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier || attemptsRemaining <= 0 {
+            Self.issuePasteShortcut(targetProcessIdentifier: processIdentifier)
+            pendingPasteTargetProcessIdentifier = nil
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + targetActivationPollInterval) { [weak self] in
+            self?.waitForPasteTargetAndPaste(
+                processIdentifier: processIdentifier,
+                attemptsRemaining: attemptsRemaining - 1
+            )
         }
     }
 
@@ -1140,6 +1566,30 @@ final class ClipboardManager: ObservableObject {
 
         UserDefaults.standard.set(clamped, forKey: Self.retentionLimitKey)
         trimUnpinnedItemsToLimit()
+    }
+
+    private func resolvedSourceApplication(
+        current: SourceApplicationSnapshot,
+        now: Date
+    ) -> SourceApplicationSnapshot? {
+        let currentIsSecure = Self.isSecureSourceApplication(
+            name: current.name,
+            bundleIdentifier: current.bundleIdentifier
+        )
+        if currentIsSecure {
+            return current
+        }
+
+        guard let lastObservedSourceApplication else { return current }
+        guard now.timeIntervalSince(lastObservedSourceApplication.observedAt) <= Self.secureSourceGraceInterval else {
+            return current
+        }
+
+        let previousIsSecure = Self.isSecureSourceApplication(
+            name: lastObservedSourceApplication.name,
+            bundleIdentifier: lastObservedSourceApplication.bundleIdentifier
+        )
+        return previousIsSecure ? lastObservedSourceApplication : current
     }
 
     private func normalize(_ value: String) -> String {
@@ -1265,6 +1715,7 @@ final class ClipboardManager: ObservableObject {
                 .map(\.id)
         }
 
+        usesCustomStackQueue = false
         stackCursor = 0
         stackQueueRevision = historyRevision
         lastStackPasteDate = nil
@@ -1273,6 +1724,10 @@ final class ClipboardManager: ObservableObject {
     private func shouldResetStackQueue(at date: Date) -> Bool {
         if stackQueue.isEmpty {
             return true
+        }
+        if usesCustomStackQueue {
+            let remainingItemIDs = Set(items.map(\.id))
+            return stackQueue.allSatisfy { !remainingItemIDs.contains($0) } || stackCursor >= stackQueue.count
         }
         if stackQueueRevision != historyRevision {
             return true
@@ -1327,6 +1782,128 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
+    private func captureBehavior(for name: String?, bundleIdentifier: String?) -> ClipboardAppRuleBehavior {
+        if let bundleIdentifier,
+           let matchedRule = appRules.first(where: { $0.bundleIdentifier == bundleIdentifier }) {
+            return matchedRule.behavior
+        }
+
+        if Self.isSecureSourceApplication(name: name, bundleIdentifier: bundleIdentifier) {
+            return .ignore
+        }
+
+        return .save
+    }
+
+    private func saveAppRules() {
+        guard let encoded = try? JSONEncoder().encode(appRules) else { return }
+        UserDefaults.standard.set(encoded, forKey: Self.appRulesKey)
+    }
+
+    private static func loadPersistedAppRules() -> [AppClipboardRule] {
+        guard let data = UserDefaults.standard.data(forKey: appRulesKey),
+              let decoded = try? JSONDecoder().decode([AppClipboardRule].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private func inspectionPayload(for item: ClipboardItem) -> Data {
+        switch item.kind {
+        case .text:
+            if let richTextData = item.richTextData {
+                return richTextData
+            }
+            if let htmlData = item.htmlData {
+                return htmlData
+            }
+            return Data((item.textContent ?? "").utf8)
+        case .image:
+            return item.imagePayloadData ?? Data()
+        case .file:
+            return Data((item.fileURL?.path ?? "").utf8)
+        }
+    }
+
+    private func writeTextItemToPasteboard(_ item: ClipboardItem, mode: ClipboardPasteMode) {
+        guard let textContent = item.textContent else { return }
+
+        switch mode {
+        case .plain:
+            pasteboard.setString(textContent, forType: .string)
+        case .rich:
+            pasteboard.setString(textContent, forType: .string)
+            if let richTextData = item.richTextData {
+                pasteboard.setData(richTextData, forType: .rtf)
+            }
+            if let htmlData = item.htmlData {
+                pasteboard.setData(htmlData, forType: .html)
+            }
+        case .markdown:
+            pasteboard.setString(textContent, forType: .string)
+            if let markdownRTF = Self.markdownRTFData(from: textContent) {
+                pasteboard.setData(markdownRTF, forType: .rtf)
+            }
+        }
+    }
+
+    private static func extractStringFromRichPayload(rtfData: Data?, htmlData: Data?) -> String? {
+        if let rtfData,
+           let attributed = try? NSAttributedString(
+                data: rtfData,
+                options: [.documentType: NSAttributedString.DocumentType.rtf],
+                documentAttributes: nil
+           ) {
+            let string = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !string.isEmpty {
+                return string
+            }
+        }
+
+        if let htmlData,
+           let attributed = try? NSAttributedString(
+                data: htmlData,
+                options: [.documentType: NSAttributedString.DocumentType.html],
+                documentAttributes: nil
+           ) {
+            let string = attributed.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !string.isEmpty {
+                return string
+            }
+        }
+
+        return nil
+    }
+
+    private static func markdownRTFData(from markdown: String) -> Data? {
+        guard let attributed = try? AttributedString(markdown: markdown) else { return nil }
+        let nsAttributed = NSAttributedString(attributed)
+        let fullRange = NSRange(location: 0, length: nsAttributed.length)
+        return try? nsAttributed.data(
+            from: fullRange,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+    }
+
+    private static func hexString(from data: Data, maxBytes: Int = 48) -> String {
+        guard !data.isEmpty else { return "No binary payload captured." }
+
+        let prefix = data.prefix(maxBytes)
+        let hexPairs = prefix.map { String(format: "%02X", $0) }
+        let grouped = stride(from: 0, to: hexPairs.count, by: 2).map { index in
+            hexPairs[index..<min(index + 2, hexPairs.count)].joined(separator: " ")
+        }
+        let suffix = data.count > maxBytes ? " …" : ""
+        return grouped.joined(separator: "  ") + suffix
+    }
+
+    private static let byteCountFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useBytes, .useKB, .useMB]
+        formatter.countStyle = .file
+        return formatter
+    }()
+
     private func formattedJSON(from input: String) -> String? {
         guard let rawData = input.data(using: .utf8) else { return nil }
         guard let object = try? JSONSerialization.jsonObject(with: rawData) else { return nil }
@@ -1347,6 +1924,11 @@ final class ClipboardManager: ObservableObject {
         return secureNameBlacklist.contains(where: { normalizedName.contains($0) })
     }
 
+    private static func containsSensitivePasteboardMetadata(in pasteboard: NSPasteboard) -> Bool {
+        let types = Set(pasteboard.types ?? [])
+        return !sensitivePasteboardTypes.isDisjoint(with: types)
+    }
+
     private func cgImage(from image: NSImage) -> CGImage? {
         var proposedRect = CGRect(origin: .zero, size: image.size)
         if let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) {
@@ -1360,9 +1942,11 @@ final class ClipboardManager: ObservableObject {
         return imageRep.cgImage
     }
 
-    private static func issuePasteShortcut() {
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-        guard AXIsProcessTrustedWithOptions(options) else { return }
+    private static func issuePasteShortcut(targetProcessIdentifier: pid_t?) {
+        if !AXIsProcessTrusted() {
+            let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
+            guard AXIsProcessTrustedWithOptions(options) else { return }
+        }
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
         let keyCode = CGKeyCode(kVK_ANSI_V)
@@ -1370,7 +1954,13 @@ final class ClipboardManager: ObservableObject {
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         keyDown?.flags = CGEventFlags.maskCommand
         keyUp?.flags = CGEventFlags.maskCommand
-        keyDown?.post(tap: CGEventTapLocation.cghidEventTap)
-        keyUp?.post(tap: CGEventTapLocation.cghidEventTap)
+
+        if let targetProcessIdentifier {
+            keyDown?.postToPid(targetProcessIdentifier)
+            keyUp?.postToPid(targetProcessIdentifier)
+        } else {
+            keyDown?.post(tap: CGEventTapLocation.cghidEventTap)
+            keyUp?.post(tap: CGEventTapLocation.cghidEventTap)
+        }
     }
 }

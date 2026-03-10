@@ -15,15 +15,13 @@ struct QuickTrayApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private static let launcherHotKeyHoldDuration: TimeInterval = 1.0
-
     private let clipboardManager = ClipboardManager.shared
     private let settings = AppSettings.shared
     private var statusItem: NSStatusItem?
     private var panelController: LauncherPanelController?
     private var quickPasteStripController: QuickPasteStripController?
     private var cancellables: Set<AnyCancellable> = []
-    private var launcherHotKeyHoldTimer: Timer?
+    private var launcherHotKeyHoldWorkItem: DispatchWorkItem?
     private var launcherHotKeyDidTriggerLongPress = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -43,8 +41,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        launcherHotKeyHoldTimer?.invalidate()
-        launcherHotKeyHoldTimer = nil
+        launcherHotKeyHoldWorkItem?.cancel()
+        launcherHotKeyHoldWorkItem = nil
     }
 
     private func configureStatusItem() {
@@ -87,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyCode: UInt32(kVK_ANSI_2),
             modifiers: UInt32(optionKey | cmdKey)
         ) { [weak self] in
+            self?.clipboardManager.capturePasteTargetApplication()
             self?.clipboardManager.quickPasteRecent(offsetFromLatest: 1)
             self?.panelController?.hide()
         }
@@ -96,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyCode: UInt32(kVK_ANSI_3),
             modifiers: UInt32(optionKey | cmdKey)
         ) { [weak self] in
+            self?.clipboardManager.capturePasteTargetApplication()
             self?.clipboardManager.quickPasteRecent(offsetFromLatest: 2)
             self?.panelController?.hide()
         }
@@ -105,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyCode: UInt32(kVK_ANSI_4),
             modifiers: UInt32(optionKey | cmdKey)
         ) { [weak self] in
+            self?.clipboardManager.capturePasteTargetApplication()
             self?.clipboardManager.quickPasteRecent(offsetFromLatest: 3)
             self?.panelController?.hide()
         }
@@ -114,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyCode: UInt32(kVK_ANSI_5),
             modifiers: UInt32(optionKey | cmdKey)
         ) { [weak self] in
+            self?.clipboardManager.capturePasteTargetApplication()
             self?.clipboardManager.quickPasteRecent(offsetFromLatest: 4)
             self?.panelController?.hide()
         }
@@ -123,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyCode: UInt32(kVK_ANSI_V),
             modifiers: UInt32(optionKey | cmdKey | shiftKey)
         ) { [weak self] in
+            self?.clipboardManager.capturePasteTargetApplication()
             self?.clipboardManager.pasteNextStackItem()
             self?.panelController?.hide()
         }
@@ -139,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc
     private func toggleLauncher() {
+        clipboardManager.capturePasteTargetApplication()
         panelController?.toggle()
     }
 
@@ -165,21 +169,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func beginLauncherHotKeyPress() {
-        guard launcherHotKeyHoldTimer == nil else { return }
+        guard launcherHotKeyHoldWorkItem == nil else { return }
+        clipboardManager.capturePasteTargetApplication()
 
         launcherHotKeyDidTriggerLongPress = false
-        launcherHotKeyHoldTimer = Timer.scheduledTimer(withTimeInterval: Self.launcherHotKeyHoldDuration, repeats: false) { [weak self] _ in
+
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             if self.presentQuickPasteStripFromLauncherHotKey() {
                 self.launcherHotKeyDidTriggerLongPress = true
                 self.panelController?.hide()
             }
+            self.launcherHotKeyHoldWorkItem = nil
         }
+
+        launcherHotKeyHoldWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + settings.launcherHoldDuration, execute: workItem)
     }
 
     private func endLauncherHotKeyPress() {
-        launcherHotKeyHoldTimer?.invalidate()
-        launcherHotKeyHoldTimer = nil
+        launcherHotKeyHoldWorkItem?.cancel()
+        launcherHotKeyHoldWorkItem = nil
 
         if launcherHotKeyDidTriggerLongPress {
             launcherHotKeyDidTriggerLongPress = false
@@ -198,6 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let itemsToShow = Array(orderedItems.prefix(limit))
         guard !itemsToShow.isEmpty else { return false }
 
+        NSApp.activate(ignoringOtherApps: true)
         quickPasteStripController?.show(items: itemsToShow, shortcutLabel: settings.toggleShortcutLabel)
         return true
     }
