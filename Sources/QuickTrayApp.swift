@@ -62,7 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quickPasteStripController = QuickPasteStripController(
             clipboardManager: clipboardManager,
             onChoose: { [weak self] item in
-                self?.clipboardManager.copyToClipboard(item: item, shouldPaste: true)
+                self?.clipboardManager.copyToClipboard(item: item, shouldPaste: true, refreshHistoryEntry: false)
                 self?.panelController?.hide()
             }
         )

@@ -878,14 +878,14 @@ final class ClipboardManager: ObservableObject {
         shouldPaste: Bool = false,
         asPlainText: Bool = false,
         pasteMode: ClipboardPasteMode? = nil,
-        refreshHistoryEntry: Bool = true
+        refreshHistoryEntry: Bool = false
     ) {
         if asPlainText {
             guard let plainText = plainTextRepresentation(for: item) else { return }
             copyTextToClipboard(
                 plainText,
                 shouldPaste: shouldPaste,
-                addToHistory: true,
+                addToHistory: refreshHistoryEntry,
                 sourceApplicationName: "QuickTray",
                 sourceBundleIdentifier: Bundle.main.bundleIdentifier
             )
@@ -928,7 +928,7 @@ final class ClipboardManager: ObservableObject {
     func quickPasteRecent(offsetFromLatest offset: Int) {
         let recentItems = items.sorted { $0.timestamp > $1.timestamp }
         guard recentItems.indices.contains(offset) else { return }
-        copyToClipboard(item: recentItems[offset], shouldPaste: true)
+        copyToClipboard(item: recentItems[offset], shouldPaste: true, refreshHistoryEntry: false)
     }
 
     func enqueueForPasteStack(_ item: ClipboardItem) {

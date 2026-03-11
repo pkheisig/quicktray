@@ -51,7 +51,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
             },
             onActivateItem: { [weak panel] item, paste in
                 panel?.orderOut(nil)
-                clipboardManager.copyToClipboard(item: item, shouldPaste: paste)
+                clipboardManager.copyToClipboard(item: item, shouldPaste: paste, refreshHistoryEntry: false)
             }
         )
 

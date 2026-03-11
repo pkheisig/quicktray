@@ -60,11 +60,7 @@ final class QuickPasteStripController: NSWindowController {
                 self?.hide()
                 self?.onChoose(item)
             },
-            onStartDrag: { [weak self] in
-                DispatchQueue.main.async {
-                    self?.hide()
-                }
-            },
+            onStartDrag: {},
             onClose: { [weak self] in
                 self?.hide()
             }
@@ -202,6 +198,9 @@ private struct QuickPasteStripTile: View {
         .onDrag {
             onStartDrag()
             return item.dragItemProvider() ?? NSItemProvider()
+        } preview: {
+            Color.clear
+                .frame(width: 1, height: 1)
         }
     }
 

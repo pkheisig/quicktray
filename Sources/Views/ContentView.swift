@@ -617,7 +617,7 @@ struct LauncherView: View {
                                         displayTitle: item.title,
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: selectedItemIDs.contains(item.id),
-                                        onSelect: { selectItem(item) },
+                                        onSelect: { handlePrimaryItemClick(item) },
                                         onPaste: { onActivateItem(item, true) },
                                         onStartDrag: startDraggingSelectedItem
                                     )
@@ -637,7 +637,7 @@ struct LauncherView: View {
                                         previewImage: clipboardManager.previewImage(for: item),
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: selectedItemIDs.contains(item.id),
-                                        onSelect: { selectItem(item) },
+                                        onSelect: { handlePrimaryItemClick(item) },
                                         onCopy: { onActivateItem(item, false) },
                                         onPaste: { onActivateItem(item, true) },
                                         onCopyPath: item.kind == .file ? { clipboardManager.copyPathToClipboard(item: item) } : nil,
@@ -663,7 +663,7 @@ struct LauncherView: View {
                                         previewImage: clipboardManager.previewImage(for: item),
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: selectedItemIDs.contains(item.id),
-                                        onSelect: { selectItem(item) },
+                                        onSelect: { handlePrimaryItemClick(item) },
                                         onCopy: { onActivateItem(item, false) },
                                         onPaste: { onActivateItem(item, true) },
                                         onCopyPath: item.kind == .file ? { clipboardManager.copyPathToClipboard(item: item) } : nil,
@@ -1281,6 +1281,15 @@ struct LauncherView: View {
         selectedItemIDs = [item.id]
     }
 
+    private func handlePrimaryItemClick(_ item: ClipboardItem) {
+        let modifiers = currentModifierFlags()
+        if modifiers.contains(.command) || modifiers.contains(.shift) {
+            selectItem(item)
+            return
+        }
+        onActivateItem(item, true)
+    }
+
     private func currentModifierFlags() -> NSEvent.ModifierFlags {
         (NSApp.currentEvent?.modifierFlags ?? []).intersection(.deviceIndependentFlagsMask)
     }
@@ -1607,13 +1616,12 @@ private struct LauncherCompactCard: View {
             TapGesture()
                 .onEnded(onSelect)
         )
-        .simultaneousGesture(
-            TapGesture(count: 2)
-                .onEnded(onPaste)
-        )
         .onDrag {
             onStartDrag()
             return item.dragItemProvider() ?? NSItemProvider()
+        } preview: {
+            Color.clear
+                .frame(width: 1, height: 1)
         }
     }
 }
@@ -1680,13 +1688,12 @@ private struct LauncherListCard: View {
             TapGesture()
                 .onEnded(onSelect)
         )
-        .simultaneousGesture(
-            TapGesture(count: 2)
-                .onEnded(onPaste)
-        )
         .onDrag {
             onStartDrag()
             return item.dragItemProvider() ?? NSItemProvider()
+        } preview: {
+            Color.clear
+                .frame(width: 1, height: 1)
         }
     }
 }
@@ -1746,13 +1753,12 @@ private struct LauncherTileCard: View {
                 TapGesture()
                     .onEnded(onSelect)
             )
-            .simultaneousGesture(
-                TapGesture(count: 2)
-                    .onEnded(onPaste)
-            )
             .onDrag {
                 onStartDrag()
                 return item.dragItemProvider() ?? NSItemProvider()
+            } preview: {
+                Color.clear
+                    .frame(width: 1, height: 1)
             }
     }
 }
