@@ -60,7 +60,11 @@ final class QuickPasteStripController: NSWindowController {
                 self?.hide()
                 self?.onChoose(item)
             },
-            onStartDrag: {},
+            onStartDrag: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.hide()
+                }
+            },
             onClose: { [weak self] in
                 self?.hide()
             }
@@ -162,37 +166,39 @@ private struct QuickPasteStripTile: View {
     let onChoose: () -> Void
 
     var body: some View {
-        Button(action: onChoose) {
-            VStack(alignment: .leading, spacing: 6) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.black.opacity(0.25))
+        VStack(alignment: .leading, spacing: 6) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.black.opacity(0.25))
 
-                    if let previewImage {
-                        Image(nsImage: previewImage)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: 100, height: 62)
-                            .clipped()
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    } else {
-                        Image(systemName: iconName)
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.45))
-                    }
+                if let previewImage {
+                    Image(nsImage: previewImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 100, height: 62)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else {
+                    Image(systemName: iconName)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.45))
                 }
-                .frame(width: 100, height: 62)
-
-                Text(item.title)
-                    .lineLimit(2)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 100, alignment: .leading)
             }
-            .padding(4)
-            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .frame(width: 100, height: 62)
+
+            Text(item.title)
+                .lineLimit(2)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 100, alignment: .leading)
         }
-        .buttonStyle(.plain)
+        .padding(4)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .simultaneousGesture(
+            TapGesture()
+                .onEnded(onChoose)
+        )
         .onDrag {
             onStartDrag()
             return item.dragItemProvider() ?? NSItemProvider()

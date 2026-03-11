@@ -7,7 +7,7 @@ private final class FloatingLauncherPanel: NSPanel {
     override var canBecomeMain: Bool { true }
 }
 
-final class LauncherPanelController: NSWindowController {
+final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private let clipboardManager: ClipboardManager
     private let settings: AppSettings
     private let panel: NSPanel
@@ -32,7 +32,7 @@ final class LauncherPanelController: NSWindowController {
         panel.hidesOnDeactivate = true
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = false
+        panel.isMovableByWindowBackground = true
         panel.alphaValue = settings.windowOpacity
         panel.standardWindowButton(.closeButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -41,6 +41,7 @@ final class LauncherPanelController: NSWindowController {
         self.panel = panel
 
         super.init(window: panel)
+        panel.delegate = self
 
         let rootView = LauncherView(
             clipboardManager: clipboardManager,
@@ -83,7 +84,7 @@ final class LauncherPanelController: NSWindowController {
     }
 
     func show() {
-        centerPanel()
+        positionPanel()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
@@ -105,6 +106,30 @@ final class LauncherPanelController: NSWindowController {
         let origin = CGPoint(
             x: visibleFrame.midX - (frame.width / 2),
             y: visibleFrame.midY - (frame.height / 2)
+        )
+
+        panel.setFrameOrigin(origin)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        settings.setLauncherWindowOrigin(panel.frame.origin)
+    }
+
+    private func positionPanel() {
+        guard let savedOrigin = settings.launcherWindowOrigin() else {
+            centerPanel()
+            return
+        }
+
+        let frame = NSRect(origin: savedOrigin, size: panel.frame.size)
+        let referenceScreen = NSScreen.screens.first { $0.visibleFrame.intersects(frame) }
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+            ?? NSScreen.main
+
+        let visibleFrame = referenceScreen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let origin = CGPoint(
+            x: min(max(savedOrigin.x, visibleFrame.minX), max(visibleFrame.maxX - panel.frame.width, visibleFrame.minX)),
+            y: min(max(savedOrigin.y, visibleFrame.minY), max(visibleFrame.maxY - panel.frame.height, visibleFrame.minY))
         )
 
         panel.setFrameOrigin(origin)

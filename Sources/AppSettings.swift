@@ -78,6 +78,8 @@ final class AppSettings: ObservableObject {
         static let toggleKeyCode = "settings.toggleKeyCode"
         static let toggleModifiers = "settings.toggleModifiers"
         static let windowOpacity = "settings.windowOpacity"
+        static let launcherWindowOriginX = "settings.launcherWindowOriginX"
+        static let launcherWindowOriginY = "settings.launcherWindowOriginY"
         static let focusSearchOnOpen = "settings.focusSearchOnOpen"
         static let hasCompletedOnboarding = "settings.hasCompletedOnboarding"
         static let showLauncherOnStartup = "settings.showLauncherOnStartup"
@@ -180,6 +182,24 @@ final class AppSettings: ObservableObject {
         windowOpacity = min(max(opacity, 0.45), 1.0)
     }
 
+    func setLauncherWindowOrigin(_ origin: CGPoint) {
+        UserDefaults.standard.set(origin.x, forKey: Keys.launcherWindowOriginX)
+        UserDefaults.standard.set(origin.y, forKey: Keys.launcherWindowOriginY)
+    }
+
+    func launcherWindowOrigin() -> CGPoint? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Keys.launcherWindowOriginX) != nil,
+              defaults.object(forKey: Keys.launcherWindowOriginY) != nil else {
+            return nil
+        }
+
+        return CGPoint(
+            x: defaults.double(forKey: Keys.launcherWindowOriginX),
+            y: defaults.double(forKey: Keys.launcherWindowOriginY)
+        )
+    }
+
     func includesModifier(_ flag: UInt32) -> Bool {
         (toggleModifiers & flag) != 0
     }
@@ -192,6 +212,8 @@ final class AppSettings: ObservableObject {
         showLauncherOnStartup = true
         commandVStripItemCount = Self.defaultCommandVStripItemCount
         launcherHoldDuration = Self.defaultLauncherHoldDuration
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
     }
 
     func completeOnboarding() {

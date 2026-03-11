@@ -11,10 +11,10 @@ struct LauncherView: View {
     let onActivateItem: (ClipboardItem, Bool) -> Void
 
     @State private var selectedItemID: UUID?
+    @State private var selectedItemIDs: Set<UUID> = []
     @State private var selectedSnippetID: UUID?
     @State private var editingItem: ClipboardItem?
     @State private var formattingItem: ClipboardItem?
-    @State private var detailItem: ClipboardItem?
     @State private var editingTemplate: SnippetTemplate?
     @State private var quickLookURL: URL?
     @State private var showClearConfirmation = false
@@ -53,6 +53,10 @@ struct LauncherView: View {
 
     private var selectedItem: ClipboardItem? {
         visibleItems.first(where: { $0.id == selectedItemID })
+    }
+
+    private var selectedItems: [ClipboardItem] {
+        visibleItems.filter { selectedItemIDs.contains($0.id) }
     }
 
     private var visibleTemplates: [SnippetTemplate] {
@@ -138,26 +142,6 @@ struct LauncherView: View {
                 }
             )
         }
-        .sheet(item: $detailItem) { item in
-            DetailSheet(
-                item: item,
-                previewImage: clipboardManager.previewImage(for: item),
-                maskedText: clipboardManager.maskedTextPreview(for: item),
-                isMasked: clipboardManager.shouldMaskDisplay(of: item),
-                sensitivitySummary: clipboardManager.sensitivitySummary(for: item),
-                inspection: clipboardManager.inspection(for: item),
-                preferredPasteMode: clipboardManager.preferredPasteMode,
-                onCopy: { onActivateItem(item, false) },
-                onPaste: { onActivateItem(item, true) },
-                onPastePlain: { clipboardManager.copyToClipboard(item: item, shouldPaste: true, asPlainText: true) },
-                onQueue: { clipboardManager.enqueueForPasteStack(item) },
-                onOCR: { clipboardManager.extractText(from: item, shouldPaste: false) },
-                onReveal: { clipboardManager.revealInFinder(item) },
-                onOpen: { clipboardManager.openFile(item) },
-                onCopyPath: { clipboardManager.copyPathToClipboard(item: item) },
-                onEdit: { editingItem = item }
-            )
-        }
         .sheet(item: $formattingItem) { item in
             TextTransformSheet(
                 item: item,
@@ -217,6 +201,7 @@ struct LauncherView: View {
         .onReceive(NotificationCenter.default.publisher(for: AppSettings.quickTrayLauncherDidShow)) { _ in
             showSettingsFromHoldKey = false
             selectedItemID = nil
+            selectedItemIDs = []
             selectedSnippetID = nil
             syncSelection()
             if !settings.hasCompletedOnboarding {
@@ -298,6 +283,24 @@ struct LauncherView: View {
                 }
 
                 Spacer()
+            } else if selectedItemIDs.count > 1 {
+                Text("\(selectedItemIDs.count) selected")
+                    .font(.system(size: 11, weight: .medium))
+
+                Text("Right-click to create a stack")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+
+                Spacer()
+
+                HStack(spacing: 12) {
+                    Text("\(clipboardManager.items.count) items")
+                    if pinnedCount > 0 {
+                        Text("\(pinnedCount) pinned")
+                    }
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.5))
             } else if selectedItemID != nil {
                 HStack(spacing: 6) {
                     Text("Return")
@@ -305,7 +308,7 @@ struct LauncherView: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 2)
                         .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
-                    Text("Paste \(clipboardManager.preferredPasteMode.title)")
+                    Text("Paste")
                         .font(.system(size: 11, weight: .medium))
                 }
 
@@ -316,16 +319,6 @@ struct LauncherView: View {
                         .padding(.vertical, 2)
                         .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
                     Text("Plain Paste")
-                        .font(.system(size: 11, weight: .medium))
-                }
-
-                HStack(spacing: 6) {
-                    Text("Space")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 4))
-                    Text("Inspect")
                         .font(.system(size: 11, weight: .medium))
                 }
 
@@ -472,35 +465,6 @@ struct LauncherView: View {
                     }
                 }
 
-                settingsSection(title: "Privacy") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Automatically mask likely secrets in history", isOn: $clipboardManager.maskSensitiveClips)
-                            .toggleStyle(.checkbox)
-                            .controlSize(.small)
-
-                        Text("Password managers and concealed clipboard types are already skipped automatically.")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.5))
-
-                        if clipboardManager.configuredApplications.isEmpty {
-                            Text("App rules appear after QuickTray sees clips from an app.")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.5))
-                        } else {
-                            VStack(spacing: 8) {
-                                ForEach(clipboardManager.configuredApplications) { application in
-                                    AppRuleRow(
-                                        application: application,
-                                        onBehaviorChange: { behavior in
-                                            clipboardManager.updateRule(for: application, behavior: behavior)
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
                 settingsSection(title: "History") {
                     HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -585,37 +549,14 @@ struct LauncherView: View {
 
     private var quickToolsBar: some View {
         HStack(spacing: 12) {
-            if clipboardManager.selectedCategory != .snippets {
-                PasteModeControl(selection: $clipboardManager.preferredPasteMode, compact: true)
-            }
-
-            if let selectedItem, clipboardManager.shouldMaskDisplay(of: selectedItem) {
+            if selectedItemIDs.count > 1 {
                 UtilityBadge(
-                    text: clipboardManager.sensitivitySummary(for: selectedItem).first ?? "Masked",
-                    symbolName: "hand.raised.fill"
+                    text: "\(selectedItemIDs.count) selected",
+                    symbolName: "checkmark.circle"
                 )
             }
 
             Spacer()
-
-            if let selectedItem, selectedItem.kind == .image {
-                Button("Extract Text") {
-                    clipboardManager.extractText(from: selectedItem, shouldPaste: false)
-                }
-                .buttonStyle(QuickGlassButtonStyle(fill: .white.opacity(0.12)))
-            } else if clipboardManager.items.contains(where: { $0.kind == .image }) {
-                Button("OCR Latest Image") {
-                    clipboardManager.extractTextFromMostRecentImage(shouldPaste: false)
-                }
-                .buttonStyle(QuickGlassButtonStyle(fill: .white.opacity(0.12)))
-            }
-
-            if let selectedItem, clipboardManager.selectedCategory != .snippets {
-                Button("Add to Stack") {
-                    clipboardManager.enqueueForPasteStack(selectedItem)
-                }
-                .buttonStyle(QuickGlassButtonStyle(fill: .white.opacity(0.12)))
-            }
 
             if !clipboardManager.pasteStackItems.isEmpty {
                 HStack(spacing: 8) {
@@ -635,12 +576,6 @@ struct LauncherView: View {
                 }
             }
 
-            if clipboardManager.selectedCategory != .snippets, selectedItem != nil {
-                Button("Inspect") {
-                    detailItem = selectedItem
-                }
-                .buttonStyle(QuickGlassButtonStyle())
-            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -679,14 +614,16 @@ struct LauncherView: View {
                                 ForEach(visibleItems) { item in
                                     LauncherCompactCard(
                                         item: item,
-                                        displayTitle: clipboardManager.displayTitle(for: item),
-                                        isSensitive: clipboardManager.shouldMaskDisplay(of: item),
+                                        displayTitle: item.title,
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
-                                        isSelected: item.id == selectedItemID,
-                                        onSelect: { selectedItemID = item.id },
+                                        isSelected: selectedItemIDs.contains(item.id),
+                                        onSelect: { selectItem(item) },
                                         onPaste: { onActivateItem(item, true) },
                                         onStartDrag: startDraggingSelectedItem
                                     )
+                                    .contextMenu {
+                                        itemContextMenu(for: item)
+                                    }
                                 }
                             }
                             .padding(.vertical, 8)
@@ -695,23 +632,24 @@ struct LauncherView: View {
                                 ForEach(visibleItems) { item in
                                     LauncherListCard(
                                         item: item,
-                                        displayTitle: clipboardManager.displayTitle(for: item),
-                                        displayDetail: clipboardManager.displayDetail(for: item),
-                                        isSensitive: clipboardManager.shouldMaskDisplay(of: item),
+                                        displayTitle: item.title,
+                                        displayDetail: item.detailText,
                                         previewImage: clipboardManager.previewImage(for: item),
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
-                                        isSelected: item.id == selectedItemID,
-                                        onSelect: { selectedItemID = item.id },
+                                        isSelected: selectedItemIDs.contains(item.id),
+                                        onSelect: { selectItem(item) },
                                         onCopy: { onActivateItem(item, false) },
                                         onPaste: { onActivateItem(item, true) },
                                         onCopyPath: item.kind == .file ? { clipboardManager.copyPathToClipboard(item: item) } : nil,
                                         onOpen: item.kind == .file ? { clipboardManager.openFile(item) } : nil,
                                         onEdit: item.canEdit ? { editingItem = item } : nil,
-                                        onDetail: { detailItem = item },
                                         onDelete: { clipboardManager.removeItem(id: item.id) },
                                         onPin: { clipboardManager.togglePin(for: item.id) },
                                         onStartDrag: startDraggingSelectedItem
                                     )
+                                    .contextMenu {
+                                        itemContextMenu(for: item)
+                                    }
                                 }
                             }
                             .padding(.vertical, 8)
@@ -720,23 +658,24 @@ struct LauncherView: View {
                                 ForEach(visibleItems) { item in
                                     LauncherTileCard(
                                         item: item,
-                                        displayTitle: clipboardManager.displayTitle(for: item),
-                                        previewText: clipboardManager.maskedTextPreview(for: item),
-                                        isSensitive: clipboardManager.shouldMaskDisplay(of: item),
+                                        displayTitle: item.title,
+                                        previewText: item.textContent,
                                         previewImage: clipboardManager.previewImage(for: item),
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
-                                        isSelected: item.id == selectedItemID,
-                                        onSelect: { selectedItemID = item.id },
+                                        isSelected: selectedItemIDs.contains(item.id),
+                                        onSelect: { selectItem(item) },
                                         onCopy: { onActivateItem(item, false) },
                                         onPaste: { onActivateItem(item, true) },
                                         onCopyPath: item.kind == .file ? { clipboardManager.copyPathToClipboard(item: item) } : nil,
                                         onOpen: item.kind == .file ? { clipboardManager.openFile(item) } : nil,
                                         onEdit: item.canEdit ? { editingItem = item } : nil,
-                                        onDetail: { detailItem = item },
                                         onDelete: { clipboardManager.removeItem(id: item.id) },
                                         onPin: { clipboardManager.togglePin(for: item.id) },
                                         onStartDrag: startDraggingSelectedItem
                                     )
+                                    .contextMenu {
+                                        itemContextMenu(for: item)
+                                    }
                                 }
                             }
                             .padding(12)
@@ -959,8 +898,9 @@ struct LauncherView: View {
                 title: "The fastest path is keyboard-first",
                 subtitle: "You can still click around, but the speed comes from the shortcuts.",
                 points: [
-                    "Arrow keys move selection, Return pastes using the current mode, Shift+Return pastes plain text, and Space inspects the clip.",
-                    "Use the toolbar to switch Rich, Plain, or Markdown paste, queue a paste stack, and extract text from images.",
+                    "Arrow keys move selection, Return pastes, and Shift+Return pastes plain text.",
+                    "Set the default paste mode in Settings. Right-click images to run OCR where you need it.",
+                    "Command-click multiple items, then right-click to create a stack in the order shown.",
                     "Use ⌥⌘2-5 for quick recent paste, and ⌥⇧⌘V to paste your captured stack in copy order."
                 ]
             )
@@ -974,6 +914,7 @@ struct LauncherView: View {
     private func syncSelection() {
         if clipboardManager.selectedCategory == .snippets {
             selectedItemID = nil
+            selectedItemIDs = []
             if let selectedSnippetID, visibleTemplates.contains(where: { $0.id == selectedSnippetID }) {
                 return
             }
@@ -982,10 +923,23 @@ struct LauncherView: View {
         }
 
         selectedSnippetID = nil
-        if let selectedItemID, visibleItems.contains(where: { $0.id == selectedItemID }) {
+        let visibleIDs = Set(visibleItems.map(\.id))
+        selectedItemIDs = selectedItemIDs.intersection(visibleIDs)
+
+        if let selectedItemID, visibleIDs.contains(selectedItemID) {
+            if selectedItemIDs.isEmpty {
+                selectedItemIDs = [selectedItemID]
+            }
             return
         }
+
+        if let retainedSelection = visibleItems.first(where: { selectedItemIDs.contains($0.id) }) {
+            selectedItemID = retainedSelection.id
+            return
+        }
+
         selectedItemID = clipboardManager.preferredSelectionID(in: visibleItems)
+        selectedItemIDs = selectedItemID.map { [$0] } ?? []
     }
 
     private func copySelected() {
@@ -1023,16 +977,6 @@ struct LauncherView: View {
     private func copySelectedPath() {
         guard let selectedItem else { return }
         clipboardManager.copyPathToClipboard(item: selectedItem)
-    }
-
-    private func queueSelected() {
-        guard let selectedItem else { return }
-        clipboardManager.enqueueForPasteStack(selectedItem)
-    }
-
-    private func inspectSelected() {
-        guard let selectedItem else { return }
-        detailItem = selectedItem
     }
 
     private func extractTextFromSelection() {
@@ -1158,11 +1102,6 @@ struct LauncherView: View {
                     formattingItem = selectedItem
                 }
                 return true
-            case kVK_ANSI_I:
-                if clipboardManager.selectedCategory != .snippets {
-                    inspectSelected()
-                }
-                return true
             case kVK_ANSI_P:
                 if clipboardManager.selectedCategory != .snippets, let selectedItem {
                     clipboardManager.togglePin(for: selectedItem.id)
@@ -1217,11 +1156,6 @@ struct LauncherView: View {
                     showSettings.toggle()
                 }
                 return true
-            case kVK_ANSI_A:
-                if modifiers.contains(.shift), clipboardManager.selectedCategory != .snippets {
-                    queueSelected()
-                    return true
-                }
             case kVK_ANSI_V:
                 if modifiers.contains(.shift) {
                     clipboardManager.pasteNextStackItem()
@@ -1251,12 +1185,8 @@ struct LauncherView: View {
             if clipboardManager.selectedCategory == .snippets {
                 return true
             }
-            if let selectedItem {
-                if selectedItem.kind == .file, let url = selectedItem.fileURL {
-                    quickLookURL = url
-                } else {
-                    detailItem = selectedItem
-                }
+            if let selectedItem, selectedItem.kind == .file, let url = selectedItem.fileURL {
+                quickLookURL = url
             }
             return true
         case kVK_LeftArrow:
@@ -1322,11 +1252,111 @@ struct LauncherView: View {
 
         guard let currentIndex = visibleItems.firstIndex(where: { $0.id == selectedItemID }) else {
             selectedItemID = clipboardManager.preferredSelectionID(in: visibleItems)
+            selectedItemIDs = selectedItemID.map { [$0] } ?? []
             return
         }
 
         let nextIndex = min(max(currentIndex + step, 0), visibleItems.count - 1)
         selectedItemID = visibleItems[nextIndex].id
+        selectedItemIDs = [visibleItems[nextIndex].id]
+    }
+
+    private func selectItem(_ item: ClipboardItem) {
+        let modifiers = currentModifierFlags()
+        if modifiers.contains(.command) || modifiers.contains(.shift) {
+            if selectedItemIDs.contains(item.id) {
+                selectedItemIDs.remove(item.id)
+                selectedItemID = selectedItems.first?.id
+                if selectedItemIDs.isEmpty {
+                    selectedItemID = nil
+                }
+            } else {
+                selectedItemIDs.insert(item.id)
+                selectedItemID = item.id
+            }
+            return
+        }
+
+        selectedItemID = item.id
+        selectedItemIDs = [item.id]
+    }
+
+    private func currentModifierFlags() -> NSEvent.ModifierFlags {
+        (NSApp.currentEvent?.modifierFlags ?? []).intersection(.deviceIndependentFlagsMask)
+    }
+
+    private func contextTargetItems(for item: ClipboardItem) -> [ClipboardItem] {
+        if selectedItemIDs.count > 1, selectedItemIDs.contains(item.id) {
+            return visibleItems.filter { selectedItemIDs.contains($0.id) }
+        }
+        return [item]
+    }
+
+    @ViewBuilder
+    private func itemContextMenu(for item: ClipboardItem) -> some View {
+        let targetItems = contextTargetItems(for: item)
+
+        if targetItems.count > 1 {
+            Button("Create Stack") {
+                clipboardManager.createPasteStack(from: targetItems)
+            }
+
+            Divider()
+
+            Button("Delete Selected", role: .destructive) {
+                deleteItems(targetItems)
+            }
+        } else {
+            Button("Copy") {
+                onActivateItem(item, false)
+            }
+
+            Button("Paste") {
+                onActivateItem(item, true)
+            }
+
+            if item.kind == .image {
+                Button("OCR") {
+                    clipboardManager.extractText(from: item, shouldPaste: false)
+                }
+            }
+
+            if item.canEdit {
+                Button("Edit") {
+                    editingItem = item
+                }
+            }
+
+            if item.kind == .file {
+                Button("Open") {
+                    clipboardManager.openFile(item)
+                }
+
+                Button("Reveal in Finder") {
+                    clipboardManager.revealInFinder(item)
+                }
+
+                Button("Copy Path") {
+                    clipboardManager.copyPathToClipboard(item: item)
+                }
+            }
+
+            Button(item.isPinned ? "Unpin" : "Pin") {
+                clipboardManager.togglePin(for: item.id)
+            }
+
+            Divider()
+
+            Button("Delete", role: .destructive) {
+                clipboardManager.removeItem(id: item.id)
+            }
+        }
+    }
+
+    private func deleteItems(_ items: [ClipboardItem]) {
+        for item in items {
+            clipboardManager.removeItem(id: item.id)
+        }
     }
 
     private func finishOnboarding() {
@@ -1502,38 +1532,6 @@ private struct UtilityBadge: View {
     }
 }
 
-private struct AppRuleRow: View {
-    let application: SourceApplicationSummary
-    let onBehaviorChange: (ClipboardAppRuleBehavior) -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(application.applicationName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-                Text("\(application.clipCount) clips")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.45))
-            }
-
-            Spacer()
-
-            Picker("Behavior", selection: Binding(
-                get: { application.behavior },
-                set: { onBehaviorChange($0) }
-            )) {
-                ForEach(ClipboardAppRuleBehavior.allCases) { behavior in
-                    Text(behavior.title).tag(behavior)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 210)
-        }
-        .padding(.vertical, 2)
-    }
-}
-
 private struct SourceApplicationBadge: View {
     let sourceName: String?
     let sourceIcon: NSImage?
@@ -1570,7 +1568,6 @@ private struct SourceApplicationBadge: View {
 private struct LauncherCompactCard: View {
     let item: ClipboardItem
     let displayTitle: String
-    let isSensitive: Bool
     let sourceAppIcon: NSImage?
     let isSelected: Bool
     let onSelect: () -> Void
@@ -1590,12 +1587,6 @@ private struct LauncherCompactCard: View {
                 .foregroundStyle(isSelected ? .white : .white.opacity(0.8))
 
             Spacer()
-
-            if isSensitive {
-                Image(systemName: "hand.raised.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color(red: 0.95, green: 0.72, blue: 0.34))
-            }
 
             SourceApplicationBadge(
                 sourceName: item.sourceApplicationName,
@@ -1631,7 +1622,6 @@ private struct LauncherListCard: View {
     let item: ClipboardItem
     let displayTitle: String
     let displayDetail: String
-    let isSensitive: Bool
     let previewImage: NSImage?
     let sourceAppIcon: NSImage?
     let isSelected: Bool
@@ -1641,7 +1631,6 @@ private struct LauncherListCard: View {
     let onCopyPath: (() -> Void)?
     let onOpen: (() -> Void)?
     let onEdit: (() -> Void)?
-    let onDetail: () -> Void
     let onDelete: () -> Void
     let onPin: () -> Void
     let onStartDrag: () -> Void
@@ -1651,18 +1640,10 @@ private struct LauncherListCard: View {
             PreviewBadge(item: item, previewImage: previewImage, side: 36)
 
             VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(displayTitle)
-                        .lineLimit(1)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(isSelected ? .white : .white.opacity(0.9))
-
-                    if isSensitive {
-                        Image(systemName: "hand.raised.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color(red: 0.95, green: 0.72, blue: 0.34))
-                    }
-                }
+                Text(displayTitle)
+                    .lineLimit(1)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isSelected ? .white : .white.opacity(0.9))
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 Text(displayDetail)
@@ -1714,7 +1695,6 @@ private struct LauncherTileCard: View {
     let item: ClipboardItem
     let displayTitle: String
     let previewText: String?
-    let isSensitive: Bool
     let previewImage: NSImage?
     let sourceAppIcon: NSImage?
     let isSelected: Bool
@@ -1724,7 +1704,6 @@ private struct LauncherTileCard: View {
     let onCopyPath: (() -> Void)?
     let onOpen: (() -> Void)?
     let onEdit: (() -> Void)?
-    let onDetail: () -> Void
     let onDelete: () -> Void
     let onPin: () -> Void
     let onStartDrag: () -> Void
@@ -1732,14 +1711,7 @@ private struct LauncherTileCard: View {
     var body: some View {
         PreviewCanvas(item: item, previewImage: previewImage, previewText: previewText)
             .overlay(alignment: .topTrailing) {
-                HStack(spacing: 6) {
-                    if isSensitive {
-                        Image(systemName: "hand.raised.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color(red: 0.95, green: 0.72, blue: 0.34))
-                            .padding(6)
-                            .background(Color.black.opacity(0.4), in: Circle())
-                    }
+                Group {
                     if item.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 10))
@@ -2073,184 +2045,6 @@ private struct TextEditSheet: View {
         }
         .padding(20)
         .frame(width: 560, height: 380)
-    }
-}
-
-private struct DetailSheet: View {
-    let item: ClipboardItem
-    let previewImage: NSImage?
-    let maskedText: String?
-    let isMasked: Bool
-    let sensitivitySummary: [String]
-    let inspection: ClipboardInspection
-    let preferredPasteMode: ClipboardPasteMode
-    let onCopy: () -> Void
-    let onPaste: () -> Void
-    let onPastePlain: () -> Void
-    let onQueue: () -> Void
-    let onOCR: () -> Void
-    let onReveal: () -> Void
-    let onOpen: () -> Void
-    let onCopyPath: () -> Void
-    let onEdit: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @State private var revealSensitiveText = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(item.kind == .text && isMasked ? "Sensitive text clip" : item.title)
-                        .font(.system(size: 22, weight: .black, design: .rounded))
-
-                    Text(item.detailText)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                if !sensitivitySummary.isEmpty {
-                    UtilityBadge(
-                        text: sensitivitySummary.joined(separator: " • "),
-                        symbolName: "hand.raised.fill"
-                    )
-                }
-            }
-
-            if let previewImage {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: 220)
-                    .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            } else if let textContent = item.textContent {
-                VStack(alignment: .leading, spacing: 10) {
-                    if isMasked {
-                        Button(revealSensitiveText ? "Hide" : "Reveal") {
-                            revealSensitiveText.toggle()
-                        }
-                        .buttonStyle(.bordered)
-                    }
-
-                    ScrollView {
-                        Text(revealSensitiveText || !isMasked ? textContent : (maskedText ?? ""))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: 220)
-                    .padding()
-                    .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Clipboard Inspector")
-                    .font(.system(size: 13, weight: .bold))
-
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    ForEach(inspection.summary) { field in
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(field.label)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Text(field.value)
-                                .lineLimit(2)
-                                .font(.system(size: 11, weight: .medium))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .padding(10)
-                        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Type IDs")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text(inspection.typeIdentifiers.isEmpty ? "No captured type identifiers." : inspection.typeIdentifiers.joined(separator: "\n"))
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Hex Preview")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Text(inspection.hexPreview)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .textSelection(.enabled)
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button("Copy") {
-                    onCopy()
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button("Paste \(preferredPasteMode.shortTitle)") {
-                    onPaste()
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-
-                if item.kind == .text {
-                    Button("Paste Plain") {
-                        onPastePlain()
-                        dismiss()
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                Button("Add to Stack") {
-                    onQueue()
-                }
-                .buttonStyle(.bordered)
-
-                if item.kind == .image {
-                    Button("Extract Text") {
-                        onOCR()
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                if item.canEdit {
-                    Button("Edit") {
-                        dismiss()
-                        onEdit()
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                if item.kind == .file {
-                    Button("Copy Path") {
-                        onCopyPath()
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Reveal") {
-                        onReveal()
-                    }
-                    .buttonStyle(.bordered)
-
-                    Button("Open") {
-                        onOpen()
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                Spacer()
-
-                Button("Close") {
-                    dismiss()
-                }
-            }
-        }
-        .padding(24)
-        .frame(width: 700, height: 620)
     }
 }
 
