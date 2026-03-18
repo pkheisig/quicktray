@@ -6,11 +6,13 @@ private final class QuickPasteStripPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-final class QuickPasteStripController: NSWindowController {
+final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
     private let clipboardManager: ClipboardManager
     private let onChoose: (ClipboardItem) -> Void
     private let panel: NSPanel
     private var hostingController: NSHostingController<QuickPasteStripView>?
+    private var dragProtectionActive = false
+    private var dragProtectionWorkItem: DispatchWorkItem?
 
     init(clipboardManager: ClipboardManager, onChoose: @escaping (ClipboardItem) -> Void) {
         self.clipboardManager = clipboardManager
@@ -28,13 +30,14 @@ final class QuickPasteStripController: NSWindowController {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
-        panel.hidesOnDeactivate = true
+        panel.hidesOnDeactivate = false
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
 
         self.panel = panel
 
         super.init(window: panel)
+        panel.delegate = self
     }
 
     @available(*, unavailable)
@@ -60,7 +63,9 @@ final class QuickPasteStripController: NSWindowController {
                 self?.hide()
                 self?.onChoose(item)
             },
-            onStartDrag: {},
+            onStartDrag: { [weak self] in
+                self?.beginDragProtection()
+            },
             onClose: { [weak self] in
                 self?.hide()
             }
@@ -100,6 +105,22 @@ final class QuickPasteStripController: NSWindowController {
 
     func hide() {
         panel.orderOut(nil)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard !dragProtectionActive else { return }
+        hide()
+    }
+
+    private func beginDragProtection() {
+        dragProtectionWorkItem?.cancel()
+        dragProtectionActive = true
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.dragProtectionActive = false
+        }
+        dragProtectionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
 }
 

@@ -12,6 +12,8 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private let settings: AppSettings
     private let panel: NSPanel
     private var cancellables: Set<AnyCancellable> = []
+    private var dragProtectionActive = false
+    private var dragProtectionWorkItem: DispatchWorkItem?
 
     init(clipboardManager: ClipboardManager, settings: AppSettings) {
         self.clipboardManager = clipboardManager
@@ -29,7 +31,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
-        panel.hidesOnDeactivate = true
+        panel.hidesOnDeactivate = false
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
@@ -52,6 +54,9 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
             onActivateItem: { [weak panel] item, paste in
                 panel?.orderOut(nil)
                 clipboardManager.copyToClipboard(item: item, shouldPaste: paste, refreshHistoryEntry: false)
+            },
+            onBeginDrag: { [weak self] in
+                self?.beginDragProtection()
             }
         )
 
@@ -115,6 +120,11 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         settings.setLauncherWindowOrigin(panel.frame.origin)
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        guard !dragProtectionActive else { return }
+        hide()
+    }
+
     private func positionPanel() {
         guard let savedOrigin = settings.launcherWindowOrigin() else {
             centerPanel()
@@ -133,5 +143,16 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         )
 
         panel.setFrameOrigin(origin)
+    }
+
+    private func beginDragProtection() {
+        dragProtectionWorkItem?.cancel()
+        dragProtectionActive = true
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.dragProtectionActive = false
+        }
+        dragProtectionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
 }

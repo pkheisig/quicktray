@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import QuickLookThumbnailing
 import Carbon.HIToolbox
 import Vision
+import CryptoKit
 
 enum ClipboardKind: String, Codable {
     case text
@@ -112,9 +113,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     var sourceBundleIdentifier: String?
     var timestamp: Date
     var isPinned: Bool
+    var payloadFingerprint: String
 
     private var cachedImage: NSImage?
     private var cachedContentType: UTType?
+    private var cachedTitleText: String?
+    private var cachedDetailText: String?
+    private var cachedSearchableText: String?
 
     var fileURL: URL? {
         guard let filePath else { return nil }
@@ -149,6 +154,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
             let size = imageRep.size
             imageWidth = Double(size.width)
             imageHeight = Double(size.height)
+            invalidateDerivedTextCaches()
             return size
         }
         if let image = NSImage(data: payload) {
@@ -184,26 +190,40 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     }
 
     var title: String {
+        if let cachedTitleText {
+            return cachedTitleText
+        }
+
+        let resolvedTitle: String
         switch kind {
         case .text:
             let firstLine = textContent?
                 .split(whereSeparator: \.isNewline)
                 .first?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return firstLine.isEmpty ? "Untitled text clip" : String(firstLine.prefix(120))
+            resolvedTitle = firstLine.isEmpty ? "Untitled text clip" : String(firstLine.prefix(120))
         case .image:
-            return "Image clip"
+            resolvedTitle = "Image clip"
         case .file:
-            return fileURL?.lastPathComponent ?? "Missing file"
+            resolvedTitle = fileURL?.lastPathComponent ?? "Missing file"
         }
+
+        cachedTitleText = resolvedTitle
+        return resolvedTitle
     }
 
     var detailText: String {
+        if let cachedDetailText {
+            return cachedDetailText
+        }
+
+        let resolvedDetail: String
         switch kind {
         case .text:
             let trimmed = textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if trimmed.isEmpty {
-                return "Empty text item"
+                resolvedDetail = "Empty text item"
+                break
             }
             let lines = trimmed
                 .split(whereSeparator: \.isNewline)
@@ -217,23 +237,28 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
                     .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !remainder.isEmpty {
-                    return String(remainder.prefix(220))
+                    resolvedDetail = String(remainder.prefix(220))
+                    break
                 }
             }
 
             let characterCount = trimmed.count
-            return characterCount == 1 ? "1 character" : "\(characterCount) characters"
+            resolvedDetail = characterCount == 1 ? "1 character" : "\(characterCount) characters"
         case .image:
             let size = imageDimensions ?? .zero
             let width = Int(size.width)
             let height = Int(size.height)
-            return "\(width) × \(height)"
+            resolvedDetail = "\(width) × \(height)"
         case .file:
             if let fileURL {
-                return fileURL.path
+                resolvedDetail = fileURL.path
+            } else {
+                resolvedDetail = "Original file is unavailable"
             }
-            return "Original file is unavailable"
         }
+
+        cachedDetailText = resolvedDetail
+        return resolvedDetail
     }
 
     var primaryCategory: ClipboardCategory {
@@ -285,16 +310,24 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     }
 
     var searchableText: String {
+        if let cachedSearchableText {
+            return cachedSearchableText
+        }
+
         let sourceText = sourceApplicationName ?? ""
+        let resolvedSearchableText: String
         switch kind {
         case .text:
-            return [title, textContent ?? "", sourceText].joined(separator: " ")
+            resolvedSearchableText = [title, textContent ?? "", sourceText].joined(separator: " ")
         case .image:
-            return [title, detailText, fileTypeToken, sourceText].joined(separator: " ")
+            resolvedSearchableText = [title, detailText, fileTypeToken, sourceText].joined(separator: " ")
         case .file:
             let localizedDescription = contentType?.localizedDescription ?? ""
-            return [title, detailText, fileTypeToken, localizedDescription, sourceText].joined(separator: " ")
+            resolvedSearchableText = [title, detailText, fileTypeToken, localizedDescription, sourceText].joined(separator: " ")
         }
+
+        cachedSearchableText = resolvedSearchableText
+        return resolvedSearchableText
     }
 
     var canEdit: Bool {
@@ -317,6 +350,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         case sourceBundleIdentifier
         case timestamp
         case isPinned
+        case payloadFingerprint
     }
 
     init(
@@ -342,6 +376,31 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         self.sourceBundleIdentifier = sourceBundleIdentifier
         timestamp = Date()
         isPinned = false
+        payloadFingerprint = Self.fingerprint(forText: text)
+    }
+
+    private init(copying item: ClipboardItem, omitImageData: Bool = false) {
+        id = item.id
+        kind = item.kind
+        textContent = item.textContent
+        imageData = omitImageData && item.kind == .image ? nil : item.imageData
+        imageDiskPath = item.imageDiskPath
+        filePath = item.filePath
+        imageWidth = item.imageWidth
+        imageHeight = item.imageHeight
+        richTextData = item.richTextData
+        htmlData = item.htmlData
+        capturedTypeIdentifiers = item.capturedTypeIdentifiers
+        sourceApplicationName = item.sourceApplicationName
+        sourceBundleIdentifier = item.sourceBundleIdentifier
+        timestamp = item.timestamp
+        isPinned = item.isPinned
+        payloadFingerprint = item.payloadFingerprint
+        cachedImage = nil
+        cachedContentType = nil
+        cachedTitleText = nil
+        cachedDetailText = nil
+        cachedSearchableText = nil
     }
 
     required init(from decoder: Decoder) throws {
@@ -361,8 +420,18 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         sourceBundleIdentifier = try container.decodeIfPresent(String.self, forKey: .sourceBundleIdentifier)
         timestamp = try container.decode(Date.self, forKey: .timestamp)
         isPinned = try container.decode(Bool.self, forKey: .isPinned)
+        payloadFingerprint = try container.decodeIfPresent(String.self, forKey: .payloadFingerprint) ?? Self.fallbackFingerprint(
+            kind: kind,
+            textContent: textContent,
+            imageData: imageData,
+            imageDiskPath: imageDiskPath,
+            filePath: filePath
+        )
         cachedImage = nil
         cachedContentType = nil
+        cachedTitleText = nil
+        cachedDetailText = nil
+        cachedSearchableText = nil
     }
 
     func encode(to encoder: Encoder) throws {
@@ -382,6 +451,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         try container.encodeIfPresent(sourceBundleIdentifier, forKey: .sourceBundleIdentifier)
         try container.encode(timestamp, forKey: .timestamp)
         try container.encode(isPinned, forKey: .isPinned)
+        try container.encode(payloadFingerprint, forKey: .payloadFingerprint)
     }
 
     init(
@@ -407,6 +477,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         timestamp = Date()
         isPinned = false
         cachedImage = nil
+        payloadFingerprint = Self.fingerprint(forImageData: imageData)
     }
 
     init(
@@ -430,6 +501,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         self.sourceBundleIdentifier = sourceBundleIdentifier
         timestamp = Date()
         isPinned = false
+        payloadFingerprint = Self.fingerprint(forFileURL: fileURL)
     }
 
     func dragItemProvider() -> NSItemProvider? {
@@ -457,18 +529,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
 
     func matchesSamePayload(as other: ClipboardItem) -> Bool {
         guard kind == other.kind else { return false }
-
-        switch kind {
-        case .text:
-            return textContent == other.textContent
-        case .image:
-            if imageDiskPath == other.imageDiskPath, imageDiskPath != nil {
-                return true
-            }
-            return imagePayloadData == other.imagePayloadData
-        case .file:
-            return filePath == other.filePath
-        }
+        return payloadFingerprint == other.payloadFingerprint
     }
 
     func setImageDataInMemory(_ data: Data?) {
@@ -487,6 +548,13 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         let size = image.size
         imageWidth = Double(size.width)
         imageHeight = Double(size.height)
+        invalidateDerivedTextCaches()
+    }
+
+    fileprivate func invalidateDerivedTextCaches() {
+        cachedTitleText = nil
+        cachedDetailText = nil
+        cachedSearchableText = nil
     }
 
     private static func imageSize(from data: Data) -> NSSize? {
@@ -504,14 +572,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     }
 
     func snapshot(omitImageData: Bool = false) -> ClipboardItem {
-        let encoder = JSONEncoder()
-        let decoder = JSONDecoder()
-        let copy = try! decoder.decode(ClipboardItem.self, from: encoder.encode(self))
-        if omitImageData, copy.kind == .image {
-            copy.imageData = nil
-            copy.cachedImage = nil
-        }
-        return copy
+        ClipboardItem(copying: self, omitImageData: omitImageData)
     }
 
     func hash(into hasher: inout Hasher) {
@@ -521,23 +582,56 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     static func == (lhs: ClipboardItem, rhs: ClipboardItem) -> Bool {
         lhs.id == rhs.id
     }
+
+    static func fingerprint(forText text: String) -> String {
+        "text:" + sha256Hex(Data(text.utf8))
+    }
+
+    static func fingerprint(forImageData data: Data) -> String {
+        "image:" + sha256Hex(data)
+    }
+
+    static func fingerprint(forFileURL url: URL) -> String {
+        let pathData = Data(url.path.utf8)
+        return "file:" + sha256Hex(pathData)
+    }
+
+    static func fallbackFingerprint(
+        kind: ClipboardKind,
+        textContent: String?,
+        imageData: Data?,
+        imageDiskPath: String?,
+        filePath: String?
+    ) -> String {
+        switch kind {
+        case .text:
+            return fingerprint(forText: textContent ?? "")
+        case .image:
+            if let imageData {
+                return fingerprint(forImageData: imageData)
+            }
+            if let imageDiskPath, let data = try? Data(contentsOf: URL(fileURLWithPath: imageDiskPath)) {
+                return fingerprint(forImageData: data)
+            }
+            return "image:\(imageDiskPath ?? "")"
+        case .file:
+            return "file:\(filePath ?? "")"
+        }
+    }
+
+    static func sha256Hex(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 private enum PreviewFactory {
-    private static let quickLookTimeout: DispatchTime = .now() + 1.2
-
-    static func previewImage(for item: ClipboardItem) -> NSImage? {
-        guard let fileURL = item.fileURL else { return nil }
-
-        if let quickLookImage = quickLookThumbnail(for: fileURL) {
-            quickLookImage.size = NSSize(width: 320, height: 200)
-            return quickLookImage
+    static func previewImage(for item: ClipboardItem, completion: @escaping (NSImage?) -> Void) {
+        guard let fileURL = item.fileURL else {
+            completion(nil)
+            return
         }
 
-        return fallbackApplicationIcon(for: fileURL)
-    }
-
-    private static func quickLookThumbnail(for fileURL: URL) -> NSImage? {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let request = QLThumbnailGenerator.Request(
             fileAt: fileURL,
@@ -545,21 +639,19 @@ private enum PreviewFactory {
             scale: scale,
             representationTypes: .all
         )
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var resultImage: NSImage?
-
         QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { representation, _ in
-            defer { semaphore.signal() }
-            guard let cgImage = representation?.cgImage else { return }
-            resultImage = NSImage(
+            guard let cgImage = representation?.cgImage else {
+                completion(fallbackApplicationIcon(for: fileURL))
+                return
+            }
+
+            let image = NSImage(
                 cgImage: cgImage,
                 size: NSSize(width: cgImage.width, height: cgImage.height)
             )
+            image.size = NSSize(width: 320, height: 200)
+            completion(image)
         }
-
-        _ = semaphore.wait(timeout: quickLookTimeout)
-        return resultImage
     }
 
     private static func fallbackApplicationIcon(for fileURL: URL) -> NSImage? {
@@ -596,16 +688,16 @@ final class ClipboardManager: ObservableObject {
 
     @Published var items: [ClipboardItem] = [] {
         didSet {
+            guard !suppressItemSideEffects else { return }
             historyRevision += 1
-            saveItems()
-            refreshDisplayedItems()
-            enforceImageMemoryBudget()
+            scheduleSaveItems()
+            scheduleDisplayedItemsRefresh()
         }
     }
 
     @Published var searchQuery = "" {
         didSet {
-            refreshDisplayedItems()
+            scheduleDisplayedItemsRefresh()
         }
     }
 
@@ -614,19 +706,19 @@ final class ClipboardManager: ObservableObject {
             if !availableFileTypeFilters.contains(fileTypeFilter) {
                 fileTypeFilter = "all"
             }
-            refreshDisplayedItems()
+            scheduleDisplayedItemsRefresh()
         }
     }
 
     @Published var fileTypeFilter = "all" {
         didSet {
-            refreshDisplayedItems()
+            scheduleDisplayedItemsRefresh()
         }
     }
 
     @Published var showPinnedOnly = false {
         didSet {
-            refreshDisplayedItems()
+            scheduleDisplayedItemsRefresh()
         }
     }
 
@@ -645,6 +737,7 @@ final class ClipboardManager: ObservableObject {
 
     @Published var displayMode: ClipboardDisplayMode = .list
     @Published private(set) var displayedItems: [ClipboardItem] = []
+    @Published private(set) var displayRevision = 0
     @Published private(set) var previewImages: [UUID: NSImage] = [:]
 
     private let pasteboard = NSPasteboard.general
@@ -652,6 +745,7 @@ final class ClipboardManager: ObservableObject {
     private var timer: Timer?
     private var lastChangeCount: Int
     private var historyRevision = 0
+    private var suppressItemSideEffects = false
     private var lastActivatedItemID: UUID?
     private var stackQueue: [UUID] = []
     private var usesCustomStackQueue = false
@@ -662,6 +756,9 @@ final class ClipboardManager: ObservableObject {
     private var pendingPasteTargetProcessIdentifier: pid_t?
     private var previewLoadsInFlight: Set<UUID> = []
     private var lastWrittenPasteboardSignature: String?
+    private var displayedItemsRefreshWorkItem: DispatchWorkItem?
+    private var saveItemsWorkItem: DispatchWorkItem?
+    private var saveItemsGeneration = 0
 
     private static func clampedRetentionLimit(_ value: Int) -> Int {
         min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
@@ -699,10 +796,43 @@ final class ClipboardManager: ObservableObject {
         loadItems()
         trimUnpinnedItemsToLimit()
         loadInitialPreviews()
-        refreshDisplayedItems()
+        refreshDisplayedItemsNow()
         if isMonitoringEnabled {
             startMonitoring()
         }
+    }
+
+    private func scheduleDisplayedItemsRefresh(delay: TimeInterval = 0.04) {
+        displayedItemsRefreshWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.refreshDisplayedItemsNow()
+        }
+        displayedItemsRefreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func scheduleSaveItems() {
+        guard let persistenceURL else { return }
+
+        saveItemsWorkItem?.cancel()
+        let snapshot = items.map { $0.snapshot(omitImageData: true) }
+        saveItemsGeneration += 1
+        let generation = saveItemsGeneration
+
+        let workItem = DispatchWorkItem { [weak self, snapshot, persistenceURL] in
+            guard let self else { return }
+            guard generation == self.saveItemsGeneration else { return }
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: persistenceURL)
+            } catch {
+                print("Failed to save clipboard history: \(error)")
+            }
+        }
+
+        saveItemsWorkItem = workItem
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 0.2, execute: workItem)
     }
 
     func preferredSelectionID(in visibleItems: [ClipboardItem]) -> UUID? {
@@ -1094,6 +1224,8 @@ final class ClipboardManager: ObservableObject {
         items[index].htmlData = nil
         items[index].capturedTypeIdentifiers = [NSPasteboard.PasteboardType.string.rawValue]
         items[index].timestamp = Date()
+        items[index].payloadFingerprint = ClipboardItem.fingerprint(forText: newValue)
+        items[index].invalidateDerivedTextCaches()
         clearPasteboardSignatureIfNeeded(for: id)
         items = items
     }
@@ -1157,8 +1289,10 @@ final class ClipboardManager: ObservableObject {
             if existingItem.capturedTypeIdentifiers.isEmpty {
                 existingItem.capturedTypeIdentifiers = item.capturedTypeIdentifiers
             }
+            existingItem.invalidateDerivedTextCaches()
             persistImagePayloadIfNeeded(for: existingItem)
             items = items
+            enforceImageMemoryBudget()
             loadPreview(for: existingItem)
             return existingItem
         }
@@ -1170,6 +1304,7 @@ final class ClipboardManager: ObservableObject {
         persistImagePayloadIfNeeded(for: item)
         items.append(item)
         trimUnpinnedItemsToLimit()
+        enforceImageMemoryBudget()
         loadPreview(for: item)
         return item
     }
@@ -1231,9 +1366,10 @@ final class ClipboardManager: ObservableObject {
         return avgTokenScore + coverage + (hasTitleHit ? 0.18 : 0) + (hasSourceHit ? 0.15 : 0)
     }
 
-    private func refreshDisplayedItems() {
+    private func refreshDisplayedItemsNow() {
         if selectedCategory == .snippets {
             displayedItems = []
+            displayRevision += 1
             return
         }
 
@@ -1245,6 +1381,7 @@ final class ClipboardManager: ObservableObject {
 
         guard !query.isEmpty else {
             displayedItems = filteredItems
+            displayRevision += 1
             return
         }
 
@@ -1261,27 +1398,39 @@ final class ClipboardManager: ObservableObject {
                 return lhs.0.timestamp > rhs.0.timestamp
             }
             .map(\.0)
+        displayRevision += 1
     }
 
     private func trimUnpinnedItemsToLimit() {
-        var unpinnedToRemove = items.filter { !$0.isPinned }.count - unpinnedRetentionLimit
-        guard unpinnedToRemove > 0 else { return }
+        let unpinnedCount = items.filter { !$0.isPinned }.count
+        let excessCount = unpinnedCount - unpinnedRetentionLimit
+        guard excessCount > 0 else { return }
 
-        let indexesToRemove = items
-            .enumerated()
-            .sorted { $0.element.timestamp < $1.element.timestamp }
-            .compactMap { index, item -> Int? in
-                guard !item.isPinned, unpinnedToRemove > 0 else { return nil }
-                unpinnedToRemove -= 1
-                return index
-            }
-            .sorted(by: >)
+        var remainingToRemove = excessCount
+        let sortedIndexes = items.enumerated().sorted { $0.element.timestamp < $1.element.timestamp }
+        var indexesToRemove: [Int] = []
+        indexesToRemove.reserveCapacity(excessCount)
 
-        for index in indexesToRemove {
-            removeImagePayload(for: items[index])
-            previewImages[items[index].id] = nil
-            items.remove(at: index)
+        for (index, item) in sortedIndexes where !item.isPinned && remainingToRemove > 0 {
+            indexesToRemove.append(index)
+            remainingToRemove -= 1
         }
+
+        guard !indexesToRemove.isEmpty else { return }
+
+        let removalSet = Set(indexesToRemove)
+        let removedItems = items.enumerated()
+            .filter { removalSet.contains($0.offset) }
+            .map(\.element)
+
+        for item in removedItems {
+            removeImagePayload(for: item)
+            previewImages[item.id] = nil
+            previewLoadsInFlight.remove(item.id)
+        }
+
+        items = items.enumerated()
+            .compactMap { removalSet.contains($0.offset) ? nil : $0.element }
     }
 
     private func loadInitialPreviews() {
@@ -1305,7 +1454,15 @@ final class ClipboardManager: ObservableObject {
             case .image:
                 image = item.imagePayloadData.flatMap(NSImage.init(data:))
             case .file:
-                image = PreviewFactory.previewImage(for: item)
+                PreviewFactory.previewImage(for: item) { image in
+                    DispatchQueue.main.async {
+                        self.previewLoadsInFlight.remove(item.id)
+                        if let image {
+                            self.previewImages[item.id] = image
+                        }
+                    }
+                }
+                return
             }
             DispatchQueue.main.async {
                 self.previewLoadsInFlight.remove(item.id)
@@ -1382,31 +1539,23 @@ final class ClipboardManager: ObservableObject {
         self.lastWrittenPasteboardSignature = nil
     }
 
-    private func saveItems() {
-        guard let persistenceURL else { return }
-        let snapshot = items.map { $0.snapshot(omitImageData: true) }
-
-        DispatchQueue.global(qos: .background).async {
-            do {
-                let data = try JSONEncoder().encode(snapshot)
-                try data.write(to: persistenceURL)
-            } catch {
-                print("Failed to save clipboard history: \(error)")
-            }
-        }
-    }
-
     private func loadItems() {
         guard let persistenceURL, FileManager.default.fileExists(atPath: persistenceURL.path) else { return }
 
         do {
             let data = try Data(contentsOf: persistenceURL)
+            suppressItemSideEffects = true
             items = try JSONDecoder().decode([ClipboardItem].self, from: data)
             for item in items {
                 persistImagePayloadIfNeeded(for: item)
             }
+            suppressItemSideEffects = false
+            historyRevision += 1
             enforceImageMemoryBudget()
+            refreshDisplayedItemsNow()
+            scheduleSaveItems()
         } catch {
+            suppressItemSideEffects = false
             print("Failed to load clipboard history: \(error)")
         }
     }

@@ -9,6 +9,7 @@ struct LauncherView: View {
     @ObservedObject private var snippetManager = SnippetManager.shared
     let onClose: () -> Void
     let onActivateItem: (ClipboardItem, Bool) -> Void
+    let onBeginDrag: () -> Void
 
     @State private var selectedItemID: UUID?
     @State private var selectedItemIDs: Set<UUID> = []
@@ -186,16 +187,10 @@ struct LauncherView: View {
             cancelSettingsReveal(hideIfNeeded: false)
             showSettingsFromHoldKey = false
         }
-        .onChange(of: clipboardManager.displayedItems.map(\.id)) { _ in
+        .onChange(of: clipboardManager.displayRevision) { _ in
             syncSelection()
         }
-        .onChange(of: clipboardManager.selectedCategory) { _ in
-            syncSelection()
-        }
-        .onChange(of: clipboardManager.searchQuery) { _ in
-            syncSelection()
-        }
-        .onChange(of: snippetManager.templates.map(\.id)) { _ in
+        .onChange(of: snippetManager.revision) { _ in
             syncSelection()
         }
         .onReceive(NotificationCenter.default.publisher(for: AppSettings.quickTrayLauncherDidShow)) { _ in
@@ -1005,6 +1000,7 @@ struct LauncherView: View {
     }
 
     private func startDraggingSelectedItem() {
+        onBeginDrag()
         showSettingsFromHoldKey = false
         showSettings = false
     }
@@ -1616,6 +1612,10 @@ private struct LauncherCompactCard: View {
             TapGesture()
                 .onEnded(onSelect)
         )
+        .simultaneousGesture(
+            TapGesture(count: 2)
+                .onEnded(onPaste)
+        )
         .onDrag {
             onStartDrag()
             return item.dragItemProvider() ?? NSItemProvider()
@@ -1688,6 +1688,10 @@ private struct LauncherListCard: View {
             TapGesture()
                 .onEnded(onSelect)
         )
+        .simultaneousGesture(
+            TapGesture(count: 2)
+                .onEnded(onPaste)
+        )
         .onDrag {
             onStartDrag()
             return item.dragItemProvider() ?? NSItemProvider()
@@ -1749,15 +1753,19 @@ private struct LauncherTileCard: View {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1)
             )
-            .simultaneousGesture(
-                TapGesture()
-                    .onEnded(onSelect)
-            )
-            .onDrag {
-                onStartDrag()
-                return item.dragItemProvider() ?? NSItemProvider()
-            } preview: {
-                Color.clear
+        .simultaneousGesture(
+            TapGesture()
+                .onEnded(onSelect)
+        )
+        .simultaneousGesture(
+            TapGesture(count: 2)
+                .onEnded(onPaste)
+        )
+        .onDrag {
+            onStartDrag()
+            return item.dragItemProvider() ?? NSItemProvider()
+        } preview: {
+            Color.clear
                     .frame(width: 1, height: 1)
             }
     }
@@ -2068,18 +2076,4 @@ private struct QuickGlassButtonStyle: ButtonStyle {
                     .fill(fill.opacity(configuration.isPressed ? 0.74 : 1))
             )
     }
-}
-
-#Preview {
-    let previewSettings = AppSettings.shared
-    previewSettings.hasCompletedOnboarding = true
-    
-    return LauncherView(
-        clipboardManager: ClipboardManager.shared,
-        settings: previewSettings,
-        onClose: {},
-        onActivateItem: { _, _ in }
-    )
-        .frame(width: 820, height: 560)
-    .background(Color(red: 0.1, green: 0.1, blue: 0.15))
 }

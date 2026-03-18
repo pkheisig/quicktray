@@ -164,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !settings.hasCompletedOnboarding || settings.showLauncherOnStartup else { return }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.clipboardManager.capturePasteTargetApplication()
             self?.panelController?.show()
         }
     }

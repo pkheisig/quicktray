@@ -29,9 +29,12 @@ final class SnippetManager: ObservableObject {
 
     @Published var templates: [SnippetTemplate] {
         didSet {
+            revision += 1
             saveTemplates()
         }
     }
+
+    @Published private(set) var revision = 0
 
     @Published var defaultEmail: String {
         didSet {
