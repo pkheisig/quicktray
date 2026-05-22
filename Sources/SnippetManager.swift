@@ -129,7 +129,7 @@ final class SnippetManager: ObservableObject {
             "clipboard": clipboardText
         ]
 
-        guard let expression = try? NSRegularExpression(pattern: "\\\\{\\\\{\\\\s*([a-zA-Z0-9_]+)\\\\s*\\\\}\\\\}") else {
+        guard let expression = try? NSRegularExpression(pattern: "\\{\\{\\s*([a-zA-Z0-9_]+)\\s*\\}\\}") else {
             return template
         }
 

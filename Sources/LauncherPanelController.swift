@@ -4,23 +4,26 @@ import Combine
 
 private final class FloatingLauncherPanel: NSPanel {
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 }
 
 final class LauncherPanelController: NSWindowController, NSWindowDelegate {
+    private static let dragProtectionTimeout: TimeInterval = 0.75
+
     private let clipboardManager: ClipboardManager
     private let settings: AppSettings
     private let panel: NSPanel
     private var cancellables: Set<AnyCancellable> = []
     private var dragProtectionActive = false
-    private var dragProtectionWorkItem: DispatchWorkItem?
+    private var dragProtectionTimeoutWorkItem: DispatchWorkItem?
+    private var dragProtectionMouseUpMonitor: Any?
 
     init(clipboardManager: ClipboardManager, settings: AppSettings) {
         self.clipboardManager = clipboardManager
         self.settings = settings
 
         let panel = FloatingLauncherPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 810, height: 560),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -30,20 +33,17 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
-        panel.alphaValue = settings.windowOpacity
-        panel.standardWindowButton(.closeButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
 
         self.panel = panel
 
         super.init(window: panel)
         panel.delegate = self
+        installDragProtectionMonitor()
 
         let rootView = LauncherView(
             clipboardManager: clipboardManager,
@@ -52,6 +52,9 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
                 panel?.orderOut(nil)
             },
             onActivateItem: { [weak panel] item, paste in
+                if paste {
+                    clipboardManager.capturePasteTargetApplication()
+                }
                 panel?.orderOut(nil)
                 clipboardManager.copyToClipboard(item: item, shouldPaste: paste, refreshHistoryEntry: false)
             },
@@ -65,12 +68,6 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentViewController = hostingController
 
-        settings.$windowOpacity
-            .receive(on: RunLoop.main)
-            .sink { [weak panel] opacity in
-                panel?.alphaValue = opacity
-            }
-            .store(in: &cancellables)
     }
 
     @available(*, unavailable)
@@ -89,13 +86,11 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
+        clipboardManager.capturePasteTargetApplication()
         positionPanel()
-        NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        panel.invalidateShadow()
         NotificationCenter.default.post(name: AppSettings.quickTrayLauncherDidShow, object: nil)
     }
 
@@ -146,13 +141,35 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     }
 
     private func beginDragProtection() {
-        dragProtectionWorkItem?.cancel()
         dragProtectionActive = true
+        dragProtectionTimeoutWorkItem?.cancel()
 
         let workItem = DispatchWorkItem { [weak self] in
-            self?.dragProtectionActive = false
+            self?.endDragProtection()
         }
-        dragProtectionWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+        dragProtectionTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dragProtectionTimeout, execute: workItem)
+    }
+
+    private func endDragProtection() {
+        dragProtectionTimeoutWorkItem?.cancel()
+        dragProtectionTimeoutWorkItem = nil
+        dragProtectionActive = false
+
+        if !panel.isKeyWindow && panel.isVisible {
+            hide()
+        }
+    }
+
+    private func installDragProtectionMonitor() {
+        dragProtectionMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] _ in
+            self?.endDragProtection()
+        }
+    }
+
+    deinit {
+        if let dragProtectionMouseUpMonitor {
+            NSEvent.removeMonitor(dragProtectionMouseUpMonitor)
+        }
     }
 }

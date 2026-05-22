@@ -35,4 +35,8 @@ else
     codesign --force --deep --sign "$IDENTITY" "$APP_BUNDLE"
 fi
 
-echo "Done! App is at $APP_BUNDLE"
+echo "Copying to /Applications..."
+rm -rf "/Applications/$APP_NAME.app"
+cp -R "$APP_BUNDLE" /Applications/
+
+echo "Done! App is at $APP_BUNDLE and copied to /Applications"

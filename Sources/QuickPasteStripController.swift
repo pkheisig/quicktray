@@ -7,12 +7,15 @@ private final class QuickPasteStripPanel: NSPanel {
 }
 
 final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
+    private static let dragProtectionTimeout: TimeInterval = 0.75
+
     private let clipboardManager: ClipboardManager
     private let onChoose: (ClipboardItem) -> Void
     private let panel: NSPanel
     private var hostingController: NSHostingController<QuickPasteStripView>?
     private var dragProtectionActive = false
-    private var dragProtectionWorkItem: DispatchWorkItem?
+    private var dragProtectionTimeoutWorkItem: DispatchWorkItem?
+    private var dragProtectionMouseUpMonitor: Any?
 
     init(clipboardManager: ClipboardManager, onChoose: @escaping (ClipboardItem) -> Void) {
         self.clipboardManager = clipboardManager
@@ -29,7 +32,7 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = true
+        panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
@@ -38,6 +41,7 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
 
         super.init(window: panel)
         panel.delegate = self
+        installDragProtectionMonitor()
     }
 
     @available(*, unavailable)
@@ -76,6 +80,8 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
         } else {
             let hostingController = NSHostingController(rootView: rootView)
             hostingController.view.wantsLayer = true
+            hostingController.view.layer?.cornerRadius = 12
+            hostingController.view.layer?.masksToBounds = true
             hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
             panel.contentViewController = hostingController
             self.hostingController = hostingController
@@ -101,6 +107,7 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
+        panel.invalidateShadow()
     }
 
     func hide() {
@@ -113,14 +120,36 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
     }
 
     private func beginDragProtection() {
-        dragProtectionWorkItem?.cancel()
         dragProtectionActive = true
+        dragProtectionTimeoutWorkItem?.cancel()
 
         let workItem = DispatchWorkItem { [weak self] in
-            self?.dragProtectionActive = false
+            self?.endDragProtection()
         }
-        dragProtectionWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
+        dragProtectionTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dragProtectionTimeout, execute: workItem)
+    }
+
+    private func endDragProtection() {
+        dragProtectionTimeoutWorkItem?.cancel()
+        dragProtectionTimeoutWorkItem = nil
+        dragProtectionActive = false
+
+        if !panel.isKeyWindow && panel.isVisible {
+            hide()
+        }
+    }
+
+    private func installDragProtectionMonitor() {
+        dragProtectionMouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] _ in
+            self?.endDragProtection()
+        }
+    }
+
+    deinit {
+        if let dragProtectionMouseUpMonitor {
+            NSEvent.removeMonitor(dragProtectionMouseUpMonitor)
+        }
     }
 }
 
@@ -140,12 +169,18 @@ private struct QuickPasteStripView: View {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
                 )
+                .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("Hold \(shortcutLabel) chooser")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.68))
+
+                    Text("Double-click on an item to paste.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.5))
+
                     Spacer()
                     Button(action: onClose) {
                         Image(systemName: "xmark")
@@ -195,6 +230,13 @@ private struct QuickPasteStripTile: View {
                         .frame(width: 100, height: 62)
                         .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else if item.kind == .text, let textPreview {
+                    Text(textPreview)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(4)
+                        .multilineTextAlignment(.leading)
+                        .frame(width: 86, height: 48, alignment: .topLeading)
                 } else {
                     Image(systemName: iconName)
                         .font(.system(size: 20, weight: .semibold))
@@ -203,7 +245,7 @@ private struct QuickPasteStripTile: View {
             }
             .frame(width: 100, height: 62)
 
-            Text(item.title)
+            Text(caption)
                 .lineLimit(2)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.9))
@@ -213,7 +255,7 @@ private struct QuickPasteStripTile: View {
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .simultaneousGesture(
-            TapGesture()
+            TapGesture(count: 2)
                 .onEnded(onChoose)
         )
         .onDrag {
@@ -234,5 +276,21 @@ private struct QuickPasteStripTile: View {
         case .file:
             return item.primaryCategory == .video ? "film" : "doc"
         }
+    }
+
+    private var textPreview: String? {
+        guard let text = item.textContent?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return nil
+        }
+
+        return text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private var caption: String {
+        item.kind == .text ? "Text" : item.title
     }
 }

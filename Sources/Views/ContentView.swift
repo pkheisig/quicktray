@@ -88,13 +88,15 @@ struct LauncherView: View {
 
     var body: some View {
         ZStack {
-            LauncherBackdrop()
+            LauncherBackdrop(opacity: settings.windowOpacity)
 
             VStack(spacing: 0) {
                 header
                 Divider().background(Color.white.opacity(0.12))
                 tabs
-                quickToolsBar
+                if selectedItemIDs.count > 1 || !clipboardManager.pasteStackItems.isEmpty {
+                    quickToolsBar
+                }
                 contentArea
                 footer
             }
@@ -134,6 +136,8 @@ struct LauncherView: View {
             }
         }
         .frame(width: 750, height: 500)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(30)
         .quickLookPreview($quickLookURL)
         .sheet(item: $editingItem) { item in
             TextEditSheet(
@@ -186,6 +190,7 @@ struct LauncherView: View {
             }
             cancelSettingsReveal(hideIfNeeded: false)
             showSettingsFromHoldKey = false
+            showSettings = false
         }
         .onChange(of: clipboardManager.displayRevision) { _ in
             syncSelection()
@@ -389,7 +394,9 @@ struct LauncherView: View {
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(.white.opacity(0.72))
 
-                            Toggle("Open on startup", isOn: $settings.showLauncherOnStartup)
+                            Toggle("Launch at login", isOn: $settings.launchAtLogin)
+                                .controlSize(.small)
+                            Toggle("Open window on startup", isOn: $settings.showLauncherOnStartup)
                                 .controlSize(.small)
                             Toggle("Focus search on open", isOn: $settings.focusSearchOnOpen)
                                 .controlSize(.small)
@@ -449,12 +456,25 @@ struct LauncherView: View {
                                 .foregroundStyle(.white.opacity(0.52))
                         }
                     }
+
                 }
 
                 settingsSection(title: "Paste") {
                     VStack(alignment: .leading, spacing: 10) {
                         PasteModeControl(selection: $clipboardManager.preferredPasteMode, compact: false)
                         Text(clipboardManager.preferredPasteMode.helpText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                }
+
+                settingsSection(title: "Privacy") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Ignore Typeless transcriptions", isOn: $settings.ignoreTypelessTranscriptions)
+                            .controlSize(.small)
+                            .toggleStyle(.checkbox)
+
+                        Text("Typeless paste injections stay out of history, even when they land in another app.")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.white.opacity(0.55))
                     }
@@ -884,7 +904,7 @@ struct LauncherView: View {
                 title: "Copy anything and it lands here",
                 subtitle: "Text, images, documents, folders, and video files all show up in one place.",
                 points: [
-                    "The default view is Mixed, so new users always see everything first.",
+                    "The default view is All, so new users always see everything first.",
                     "Use the tabs to jump into Text, Images, Video, Docs, or Files.",
                     "If Quick Look cannot preview a file, QuickTray shows the icon of the default app that opens it."
                 ]
@@ -945,6 +965,7 @@ struct LauncherView: View {
     private func pasteSelected(asPlainText: Bool = false) {
         guard let selectedItem else { return }
         if asPlainText {
+            clipboardManager.capturePasteTargetApplication()
             onClose()
             clipboardManager.copyToClipboard(item: selectedItem, shouldPaste: true, asPlainText: true)
             return
@@ -965,6 +986,7 @@ struct LauncherView: View {
 
     private func pasteSelectedTemplate() {
         guard let selectedTemplate else { return }
+        clipboardManager.capturePasteTargetApplication()
         onClose()
         snippetManager.pasteTemplate(selectedTemplate, shouldPaste: true)
     }
@@ -1154,6 +1176,7 @@ struct LauncherView: View {
                 return true
             case kVK_ANSI_V:
                 if modifiers.contains(.shift) {
+                    clipboardManager.capturePasteTargetApplication()
                     clipboardManager.pasteNextStackItem()
                     onClose()
                     return true
@@ -1278,12 +1301,7 @@ struct LauncherView: View {
     }
 
     private func handlePrimaryItemClick(_ item: ClipboardItem) {
-        let modifiers = currentModifierFlags()
-        if modifiers.contains(.command) || modifiers.contains(.shift) {
-            selectItem(item)
-            return
-        }
-        onActivateItem(item, true)
+        selectItem(item)
     }
 
     private func currentModifierFlags() -> NSEvent.ModifierFlags {
@@ -1379,13 +1397,33 @@ private struct OnboardingPage {
 }
 
 private struct LauncherBackdrop: View {
+    var opacity: Double
+
     var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(.ultraThinMaterial)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-            )
+        ZStack {
+            BlurEffectView(opacity: opacity)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
+    }
+}
+
+private struct BlurEffectView: NSViewRepresentable {
+    var opacity: Double
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .hudWindow
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.alphaValue = opacity
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.alphaValue = opacity
     }
 }
 
@@ -1652,12 +1690,7 @@ private struct LauncherListCard: View {
                     .lineLimit(1)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(isSelected ? .white : .white.opacity(0.9))
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text(displayDetail)
-                    .lineLimit(1)
-                    .font(.system(size: 12, weight: .regular))
-                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .white.opacity(0.5))
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 SourceApplicationBadge(
                     sourceName: item.sourceApplicationName,
@@ -1673,15 +1706,22 @@ private struct LauncherListCard: View {
                     .foregroundStyle(.white.opacity(0.4))
             }
 
-            Text(item.fileTypeToken.uppercased())
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white.opacity(0.3))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(item.fileTypeToken.uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.3))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+
+                Text(displayDetail)
+                    .lineLimit(1)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .white.opacity(0.5))
+            }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
         .contentShape(Rectangle())
         .simultaneousGesture(
@@ -1720,39 +1760,40 @@ private struct LauncherTileCard: View {
     let onStartDrag: () -> Void
 
     var body: some View {
-        PreviewCanvas(item: item, previewImage: previewImage, previewText: previewText)
-            .overlay(alignment: .topTrailing) {
-                Group {
-                    if item.isPinned {
-                        Image(systemName: "pin.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.white)
-                            .padding(6)
-                            .background(Color.black.opacity(0.4), in: Circle())
-                    }
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack(alignment: .topTrailing) {
+                PreviewCanvas(item: item, previewImage: previewImage, previewText: previewText)
+
+                if item.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white)
+                        .padding(6)
+                        .background(Color.black.opacity(0.4), in: Circle())
+                        .padding(8)
                 }
-                .padding(8)
             }
-            .overlay(alignment: .bottomLeading) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(displayTitle)
-                        .lineLimit(2)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                    SourceApplicationBadge(
-                        sourceName: item.sourceApplicationName,
-                        sourceIcon: sourceAppIcon
-                    )
-                }
-                .padding(8)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(displayTitle)
+                    .lineLimit(2)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+
+                SourceApplicationBadge(
+                    sourceName: item.sourceApplicationName,
+                    sourceIcon: sourceAppIcon
+                )
             }
-            .padding(6)
-            .background(isSelected ? Color.white.opacity(0.15) : Color.white.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1)
-            )
+            .padding(.horizontal, 8)
+            .padding(.bottom, 8)
+        }
+        .background(isSelected ? Color.white.opacity(0.15) : Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1)
+        )
         .simultaneousGesture(
             TapGesture()
                 .onEnded(onSelect)
@@ -1766,8 +1807,8 @@ private struct LauncherTileCard: View {
             return item.dragItemProvider() ?? NSItemProvider()
         } preview: {
             Color.clear
-                    .frame(width: 1, height: 1)
-            }
+                .frame(width: 1, height: 1)
+        }
     }
 }
 
@@ -1813,8 +1854,7 @@ private struct PreviewCanvas: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.black.opacity(0.2))
+            Color.black.opacity(0.2)
 
             if let previewImage {
                 Color.clear
@@ -1823,7 +1863,6 @@ private struct PreviewCanvas: View {
                             .resizable()
                             .scaledToFill()
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else if item.kind == .text, let previewText {
                 Text(previewText)
                     .lineLimit(4)

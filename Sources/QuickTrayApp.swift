@@ -47,11 +47,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureStatusItem() {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "tray.full.fill", accessibilityDescription: "QuickTray")
-        statusItem.button?.action = #selector(toggleLauncher)
-        statusItem.button?.target = self
+        let icon = statusBarIcon()
+        statusItem.button?.image = icon
+        statusItem.button?.imagePosition = .imageOnly
+        statusItem.button?.imageScaling = .scaleProportionallyDown
         statusItem.button?.toolTip = "QuickTray"
+
+        let menu = NSMenu()
+        menu.addItem(NSMenuItem(title: "Open App", action: #selector(menuOpenApp), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Close App", action: #selector(menuCloseApp), keyEquivalent: ""))
+
+        for item in menu.items {
+            item.target = self
+        }
+
+        statusItem.menu = menu
         self.statusItem = statusItem
+    }
+
+    private func statusBarIcon() -> NSImage {
+        if let icon = NSImage(systemSymbolName: "tray.full.fill", accessibilityDescription: "QuickTray") {
+            icon.size = NSSize(width: 18, height: 18)
+            icon.isTemplate = true
+            return icon
+        }
+
+        let icon = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
+            let inset = rect.insetBy(dx: 1, dy: 2)
+            let tray = NSBezierPath()
+            tray.move(to: NSPoint(x: inset.minX, y: inset.minY + 4))
+            tray.line(to: NSPoint(x: inset.minX + 3, y: inset.minY))
+            tray.line(to: NSPoint(x: inset.maxX - 3, y: inset.minY))
+            tray.line(to: NSPoint(x: inset.maxX, y: inset.minY + 4))
+            tray.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
+            tray.line(to: NSPoint(x: inset.minX, y: inset.maxY))
+            tray.close()
+            NSColor.black.setStroke()
+            tray.lineWidth = 1.3
+            tray.stroke()
+            let shelf = NSBezierPath()
+            shelf.move(to: NSPoint(x: inset.minX, y: inset.minY + 4))
+            shelf.line(to: NSPoint(x: inset.minX + 5, y: inset.minY + 4))
+            shelf.line(to: NSPoint(x: inset.minX + 6, y: inset.minY + 6.5))
+            shelf.line(to: NSPoint(x: inset.maxX - 6, y: inset.minY + 6.5))
+            shelf.line(to: NSPoint(x: inset.maxX - 5, y: inset.minY + 4))
+            shelf.line(to: NSPoint(x: inset.maxX, y: inset.minY + 4))
+            shelf.lineWidth = 1.0
+            shelf.stroke()
+            return true
+        }
+        icon.isTemplate = true
+        return icon
     }
 
     private func configureLauncherPanel() {
@@ -62,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quickPasteStripController = QuickPasteStripController(
             clipboardManager: clipboardManager,
             onChoose: { [weak self] item in
+                self?.clipboardManager.capturePasteTargetApplication()
                 self?.clipboardManager.copyToClipboard(item: item, shouldPaste: true, refreshHistoryEntry: false)
                 self?.panelController?.hide()
             }
@@ -146,6 +193,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController?.toggle()
     }
 
+    @objc
+    func menuOpenApp() {
+        clipboardManager.capturePasteTargetApplication()
+        panelController?.show()
+    }
+
+    @objc
+    func menuCloseApp() {
+        NSApp.terminate(nil)
+    }
+
     private func registerLauncherHotKey() {
         HotKeyManager.shared.register(
             id: 1,
@@ -209,7 +267,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let itemsToShow = Array(orderedItems.prefix(limit))
         guard !itemsToShow.isEmpty else { return false }
 
-        NSApp.activate(ignoringOtherApps: true)
         quickPasteStripController?.show(items: itemsToShow, shortcutLabel: settings.toggleShortcutLabel)
         return true
     }

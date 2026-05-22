@@ -1,5 +1,6 @@
 import Foundation
 import Carbon.HIToolbox
+import ServiceManagement
 
 struct HotKeyChoice: Identifiable, Hashable {
     let keyCode: UInt32
@@ -19,9 +20,10 @@ final class AppSettings: ObservableObject {
     static let defaultCommandVStripItemCount = 5
     static let minCommandVStripItemCount = 2
     static let maxCommandVStripItemCount = 10
-    static let defaultLauncherHoldDuration = 1.0
+    static let defaultLauncherHoldDuration = 0.7
     static let minLauncherHoldDuration = 0.2
     static let maxLauncherHoldDuration = 1.8
+    static let typelessBundleIdentifier = "now.typeless.desktop"
 
     static let availableToggleKeys: [HotKeyChoice] = [
         HotKeyChoice(keyCode: UInt32(kVK_Space), label: "Space"),
@@ -85,6 +87,7 @@ final class AppSettings: ObservableObject {
         static let showLauncherOnStartup = "settings.showLauncherOnStartup"
         static let commandVStripItemCount = "settings.commandVStripItemCount"
         static let launcherHoldDuration = "settings.launcherHoldDuration"
+        static let ignoreTypelessTranscriptions = "settings.ignoreTypelessTranscriptions"
     }
 
     @Published var toggleKeyCode: UInt32 {
@@ -119,6 +122,17 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var launchAtLogin: Bool {
+        didSet {
+            let service = SMAppService.mainApp
+            if launchAtLogin {
+                _ = try? service.register()
+            } else {
+                _ = try? service.unregister()
+            }
+        }
+    }
+
     @Published var commandVStripItemCount: Int {
         didSet {
             let clamped = Self.clampedCommandVStripItemCount(commandVStripItemCount)
@@ -141,6 +155,12 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var ignoreTypelessTranscriptions: Bool {
+        didSet {
+            UserDefaults.standard.set(ignoreTypelessTranscriptions, forKey: Keys.ignoreTypelessTranscriptions)
+        }
+    }
+
     private init() {
         let defaults = UserDefaults.standard
         let savedKeyCode = defaults.object(forKey: Keys.toggleKeyCode) != nil ? UInt32(defaults.integer(forKey: Keys.toggleKeyCode)) : nil
@@ -153,11 +173,13 @@ final class AppSettings: ObservableObject {
         focusSearchOnOpen = defaults.object(forKey: Keys.focusSearchOnOpen) as? Bool ?? true
         hasCompletedOnboarding = defaults.object(forKey: Keys.hasCompletedOnboarding) as? Bool ?? false
         showLauncherOnStartup = defaults.object(forKey: Keys.showLauncherOnStartup) as? Bool ?? true
+        launchAtLogin = SMAppService.mainApp.status == .enabled
         let savedCommandVCount = defaults.integer(forKey: Keys.commandVStripItemCount)
         let initialCommandVCount = savedCommandVCount > 0 ? savedCommandVCount : Self.defaultCommandVStripItemCount
         commandVStripItemCount = Self.clampedCommandVStripItemCount(initialCommandVCount)
         let savedHoldDuration = defaults.object(forKey: Keys.launcherHoldDuration) as? Double
         launcherHoldDuration = Self.clampedLauncherHoldDuration(savedHoldDuration ?? Self.defaultLauncherHoldDuration)
+        ignoreTypelessTranscriptions = defaults.object(forKey: Keys.ignoreTypelessTranscriptions) as? Bool ?? true
     }
 
     var toggleShortcutLabel: String {
@@ -212,6 +234,7 @@ final class AppSettings: ObservableObject {
         showLauncherOnStartup = true
         commandVStripItemCount = Self.defaultCommandVStripItemCount
         launcherHoldDuration = Self.defaultLauncherHoldDuration
+        ignoreTypelessTranscriptions = true
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
     }

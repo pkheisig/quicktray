@@ -25,7 +25,7 @@ enum ClipboardCategory: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .mixed: return "Mixed"
+        case .mixed: return "All"
         case .text: return "Text"
         case .images: return "Images"
         case .video: return "Video"
@@ -120,6 +120,37 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     private var cachedTitleText: String?
     private var cachedDetailText: String?
     private var cachedSearchableText: String?
+
+    private var cachedSearchableTokens: [String]?
+    private var cachedTitleTokens: [String]?
+    private var cachedSourceTokens: [String]?
+
+    var searchableTokens: [String] {
+        if let cachedSearchableTokens {
+            return cachedSearchableTokens
+        }
+        let tokens = ClipboardManager.tokenizedWords(searchableText)
+        cachedSearchableTokens = tokens
+        return tokens
+    }
+
+    var titleTokens: [String] {
+        if let cachedTitleTokens {
+            return cachedTitleTokens
+        }
+        let tokens = ClipboardManager.tokenizedWords(title)
+        cachedTitleTokens = tokens
+        return tokens
+    }
+
+    var sourceTokens: [String] {
+        if let cachedSourceTokens {
+            return cachedSourceTokens
+        }
+        let tokens = ClipboardManager.tokenizedWords(sourceApplicationName ?? "")
+        cachedSourceTokens = tokens
+        return tokens
+    }
 
     var fileURL: URL? {
         guard let filePath else { return nil }
@@ -510,14 +541,28 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
             guard let textContent else { return nil }
             return NSItemProvider(object: textContent as NSString)
         case .image:
-            guard let imagePayloadData else { return nil }
             let provider = NSItemProvider()
             let typeIdentifier = preferredImageDragTypeIdentifier
+            let imageData = self.imageData
+            let imageDiskPath = self.imageDiskPath
             provider.registerDataRepresentation(
                 forTypeIdentifier: typeIdentifier,
                 visibility: .all
             ) { completion in
-                completion(imagePayloadData, nil)
+                if let imageData {
+                    completion(imageData, nil)
+                    return nil
+                }
+
+                guard let imageDiskPath else {
+                    completion(nil, nil)
+                    return nil
+                }
+
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let data = try? Data(contentsOf: URL(fileURLWithPath: imageDiskPath))
+                    completion(data, nil)
+                }
                 return nil
             }
             return provider
@@ -555,6 +600,9 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         cachedTitleText = nil
         cachedDetailText = nil
         cachedSearchableText = nil
+        cachedSearchableTokens = nil
+        cachedTitleTokens = nil
+        cachedSourceTokens = nil
     }
 
     private static func imageSize(from data: Data) -> NSSize? {
@@ -584,16 +632,37 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     }
 
     static func fingerprint(forText text: String) -> String {
-        "text:" + sha256Hex(Data(text.utf8))
+        let length = text.count
+        if length < 2000 {
+            return "text:\(length):\(sha256Hex(Data(text.utf8)))"
+        } else {
+            let prefix = text.prefix(1000)
+            let suffix = text.suffix(1000)
+            return "text:\(length):\(sha256Hex(Data((String(prefix) + String(suffix)).utf8)))"
+        }
     }
 
     static func fingerprint(forImageData data: Data) -> String {
-        "image:" + sha256Hex(data)
+        let length = data.count
+        if length < 4000 {
+            return "image:\(length):\(sha256Hex(data))"
+        } else {
+            let prefix = data.prefix(2000)
+            let suffix = data.suffix(2000)
+            return "image:\(length):\(sha256Hex(prefix + suffix))"
+        }
     }
 
     static func fingerprint(forFileURL url: URL) -> String {
-        let pathData = Data(url.path.utf8)
-        return "file:" + sha256Hex(pathData)
+        let path = url.path
+        let length = path.count
+        if length < 1000 {
+            return "file:\(length):\(sha256Hex(Data(path.utf8)))"
+        } else {
+            let prefix = path.prefix(500)
+            let suffix = path.suffix(500)
+            return "file:\(length):\(sha256Hex(Data((String(prefix) + String(suffix)).utf8)))"
+        }
     }
 
     static func fallbackFingerprint(
@@ -754,11 +823,20 @@ final class ClipboardManager: ObservableObject {
     private var lastStackPasteDate: Date?
     private var sourceAppIconCache: [String: NSImage] = [:]
     private var pendingPasteTargetProcessIdentifier: pid_t?
+    private var lastPasteTargetProcessIdentifier: pid_t?
     private var previewLoadsInFlight: Set<UUID> = []
     private var lastWrittenPasteboardSignature: String?
     private var displayedItemsRefreshWorkItem: DispatchWorkItem?
     private var saveItemsWorkItem: DispatchWorkItem?
     private var saveItemsGeneration = 0
+    private var clipboardMonitoringSuspendedUntil: Date?
+    private var typelessPasteEventTap: CFMachPort?
+    private var typelessPasteEventSource: CFRunLoopSource?
+    private var lastPasteShortcutDate: Date?
+    private var lastTypelessPasteShortcutDate: Date?
+    private static let postPasteMonitoringSuspension: TimeInterval = 0.5
+    private static let typelessPasteIgnoreWindow: TimeInterval = 2.0
+    private static let typelessPasteFallbackIgnoreWindow: TimeInterval = 0.9
 
     private static func clampedRetentionLimit(_ value: Int) -> Int {
         min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
@@ -797,6 +875,7 @@ final class ClipboardManager: ObservableObject {
         trimUnpinnedItemsToLimit()
         loadInitialPreviews()
         refreshDisplayedItemsNow()
+        installTypelessPasteEventMonitor()
         if isMonitoringEnabled {
             startMonitoring()
         }
@@ -846,9 +925,16 @@ final class ClipboardManager: ObservableObject {
     }
 
     func capturePasteTargetApplication(_ application: NSRunningApplication? = NSWorkspace.shared.frontmostApplication) {
-        guard let application else { return }
-        guard application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
-        pendingPasteTargetProcessIdentifier = application.processIdentifier
+        let currentProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+
+        if let application, application.processIdentifier != currentProcessIdentifier {
+            rememberPasteTarget(application)
+            return
+        }
+
+        if let fallbackApplication = Self.visibleApplicationBelowQuickTray(excluding: currentProcessIdentifier) {
+            rememberPasteTarget(fallbackApplication)
+        }
     }
 
     func sourceAppIcon(for item: ClipboardItem) -> NSImage? {
@@ -918,6 +1004,10 @@ final class ClipboardManager: ObservableObject {
     }
 
     func checkClipboard() {
+        if let suspendedUntil = clipboardMonitoringSuspendedUntil, suspendedUntil > Date() {
+            return
+        }
+
         let sourceApplication = NSWorkspace.shared.frontmostApplication
         let sourceName = sourceApplication?.localizedName
         let sourceBundleIdentifier = sourceApplication?.bundleIdentifier
@@ -927,6 +1017,9 @@ final class ClipboardManager: ObservableObject {
         lastWrittenPasteboardSignature = nil
 
         let capturedTypes = (pasteboard.types ?? []).map(\.rawValue)
+        guard !shouldIgnoreClipboardChange(sourceName: sourceName, sourceBundleIdentifier: sourceBundleIdentifier) else {
+            return
+        }
 
         let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL],
@@ -982,6 +1075,31 @@ final class ClipboardManager: ObservableObject {
         items = items
     }
 
+    private func shouldIgnoreClipboardChange(sourceName: String?, sourceBundleIdentifier: String?) -> Bool {
+        guard AppSettings.shared.ignoreTypelessTranscriptions else { return false }
+
+        if sourceBundleIdentifier == AppSettings.typelessBundleIdentifier {
+            return true
+        }
+
+        if sourceName?.localizedCaseInsensitiveCompare("Typeless") == .orderedSame {
+            return true
+        }
+
+        if let lastTypelessPasteShortcutDate,
+           Date().timeIntervalSince(lastTypelessPasteShortcutDate) <= Self.typelessPasteIgnoreWindow {
+            return true
+        }
+
+        if Self.isTypelessRunning(),
+           let lastPasteShortcutDate,
+           Date().timeIntervalSince(lastPasteShortcutDate) <= Self.typelessPasteFallbackIgnoreWindow {
+            return true
+        }
+
+        return false
+    }
+
     func clearAll() {
         removeAllImagePayloadsFromDisk()
         items.removeAll()
@@ -1025,34 +1143,31 @@ final class ClipboardManager: ObservableObject {
         let effectivePasteMode = pasteMode ?? preferredPasteMode
         let signature = pasteboardSignature(for: item, pasteMode: effectivePasteMode)
 
-        if !pasteboardAlreadyContains(signature: signature) {
-            pasteboard.clearContents()
-
-            switch item.kind {
-            case .text:
-                writeTextItemToPasteboard(item, mode: effectivePasteMode)
-            case .image:
-                if let imagePayload = item.imagePayloadData {
-                    pasteboard.setData(imagePayload, forType: .tiff)
-                } else if let imageContent = item.imageContent {
-                    pasteboard.writeObjects([imageContent])
-                }
-            case .file:
-                if let fileURL = item.fileURL {
-                    pasteboard.writeObjects([fileURL as NSURL])
-                }
-            }
-
-            lastChangeCount = pasteboard.changeCount
-            lastWrittenPasteboardSignature = signature
+        switch item.kind {
+        case .text:
+            writeStandardItemToPasteboard(
+                item,
+                signature: signature,
+                shouldPaste: shouldPaste,
+                refreshHistoryEntry: refreshHistoryEntry,
+                pasteMode: effectivePasteMode
+            )
+        case .file:
+            writeStandardItemToPasteboard(
+                item,
+                signature: signature,
+                shouldPaste: shouldPaste,
+                refreshHistoryEntry: refreshHistoryEntry,
+                pasteMode: effectivePasteMode
+            )
+        case .image:
+            writeImageToPasteboard(
+                item: item,
+                signature: signature,
+                shouldPaste: shouldPaste,
+                refreshHistoryEntry: refreshHistoryEntry
+            )
         }
-
-        if shouldPaste {
-            schedulePasteShortcut()
-        }
-
-        guard refreshHistoryEntry else { return }
-        recordActivation(for: item, deferUIWork: shouldPaste)
     }
 
     func quickPasteRecent(offsetFromLatest offset: Int) {
@@ -1333,11 +1448,10 @@ final class ClipboardManager: ObservableObject {
         !showPinnedOnly || item.isPinned
     }
 
-    private func searchScore(for item: ClipboardItem, query: String) -> Double {
-        let queryTokens = tokenizedWords(query)
+    private func searchScore(for item: ClipboardItem, queryTokens: [String]) -> Double {
         guard !queryTokens.isEmpty else { return 1 }
 
-        let searchableTokens = tokenizedWords(item.searchableText)
+        let searchableTokens = item.searchableTokens
         guard !searchableTokens.isEmpty else { return 0 }
 
         var tokenScores: [Double] = []
@@ -1354,8 +1468,8 @@ final class ClipboardManager: ObservableObject {
         let avgTokenScore = tokenScores.reduce(0, +) / Double(tokenScores.count)
         let coverage = Double(tokenScores.filter { $0 > 0.55 }.count) / Double(tokenScores.count)
 
-        let titleTokens = tokenizedWords(item.title)
-        let sourceTokens = tokenizedWords(item.sourceApplicationName ?? "")
+        let titleTokens = item.titleTokens
+        let sourceTokens = item.sourceTokens
         let hasTitleHit = queryTokens.contains { queryToken in
             titleTokens.contains(where: { fuzzyTokenScore(query: queryToken, candidate: $0) > 0.8 })
         }
@@ -1385,9 +1499,16 @@ final class ClipboardManager: ObservableObject {
             return
         }
 
+        let queryTokens = Self.tokenizedWords(query)
+        guard !queryTokens.isEmpty else {
+            displayedItems = filteredItems
+            displayRevision += 1
+            return
+        }
+
         displayedItems = filteredItems
             .compactMap { item -> (ClipboardItem, Double)? in
-                let score = searchScore(for: item, query: query)
+                let score = searchScore(for: item, queryTokens: queryTokens)
                 guard score > 0 else { return nil }
                 return (item, score)
             }
@@ -1474,20 +1595,152 @@ final class ClipboardManager: ObservableObject {
     }
 
     private func schedulePasteShortcut() {
-        let targetProcessIdentifier = pendingPasteTargetProcessIdentifier
+        let targetProcessIdentifier = pendingPasteTargetProcessIdentifier ?? lastPasteTargetProcessIdentifier
         pendingPasteTargetProcessIdentifier = nil
+        suspendClipboardMonitoring(for: Self.postPasteMonitoringSuspension)
 
-        DispatchQueue.main.async {
-            if let targetProcessIdentifier {
-                self.restorePasteTargetApplication(processIdentifier: targetProcessIdentifier)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            let targetApplication = targetProcessIdentifier.flatMap(NSRunningApplication.init(processIdentifier:))
+            let eventTargetProcessIdentifier = targetApplication?.processIdentifier
+
+            if let application = targetApplication {
+                application.activate(options: [.activateIgnoringOtherApps])
             }
-            Self.issuePasteShortcut(targetProcessIdentifier: targetProcessIdentifier)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                DispatchQueue.global(qos: .userInteractive).async {
+                    Self.issuePasteShortcut(targetProcessIdentifier: eventTargetProcessIdentifier)
+                }
+            }
+        }
+    }
+
+    private func suspendClipboardMonitoring(for duration: TimeInterval) {
+        let resumeDate = Date().addingTimeInterval(duration)
+        if let clipboardMonitoringSuspendedUntil {
+            self.clipboardMonitoringSuspendedUntil = max(clipboardMonitoringSuspendedUntil, resumeDate)
+        } else {
+            clipboardMonitoringSuspendedUntil = resumeDate
+        }
+    }
+
+    private func installTypelessPasteEventMonitor() {
+        guard typelessPasteEventTap == nil else { return }
+
+        let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+
+        guard let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: eventMask,
+            callback: { _, type, event, refcon in
+                guard type == .keyDown, let refcon else {
+                    return Unmanaged.passUnretained(event)
+                }
+
+                let manager = Unmanaged<ClipboardManager>.fromOpaque(refcon).takeUnretainedValue()
+                manager.noteTypelessPasteShortcutIfNeeded(event)
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: selfPointer
+        ) else {
+            return
+        }
+
+        let eventSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), eventSource, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+
+        typelessPasteEventTap = eventTap
+        typelessPasteEventSource = eventSource
+    }
+
+    private func noteTypelessPasteShortcutIfNeeded(_ event: CGEvent) {
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        guard keyCode == Int64(kVK_ANSI_V) else { return }
+        guard event.flags.contains(.maskCommand) else { return }
+
+        let sourceProcessIdentifier = pid_t(event.getIntegerValueField(.eventSourceUnixProcessID))
+        let isTypelessPasteShortcut = Self.isTypelessProcess(sourceProcessIdentifier)
+
+        DispatchQueue.main.async { [weak self] in
+            let now = Date()
+            self?.lastPasteShortcutDate = now
+            if isTypelessPasteShortcut {
+                self?.lastTypelessPasteShortcutDate = now
+            }
         }
     }
 
     private func restorePasteTargetApplication(processIdentifier: pid_t) {
         guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return }
         application.activate(options: [.activateIgnoringOtherApps])
+    }
+
+    private func rememberPasteTarget(_ application: NSRunningApplication) {
+        pendingPasteTargetProcessIdentifier = application.processIdentifier
+        lastPasteTargetProcessIdentifier = application.processIdentifier
+    }
+
+    private func writeStandardItemToPasteboard(
+        _ item: ClipboardItem,
+        signature: String,
+        shouldPaste: Bool,
+        refreshHistoryEntry: Bool,
+        pasteMode: ClipboardPasteMode
+    ) {
+        if !pasteboardAlreadyContains(signature: signature) {
+            pasteboard.clearContents()
+
+            switch item.kind {
+            case .text:
+                writeTextItemToPasteboard(item, mode: pasteMode)
+            case .file:
+                if let fileURL = item.fileURL {
+                    pasteboard.writeObjects([fileURL as NSURL])
+                }
+            case .image:
+                break
+            }
+
+            lastChangeCount = pasteboard.changeCount
+            lastWrittenPasteboardSignature = signature
+        }
+
+        if shouldPaste {
+            schedulePasteShortcut()
+        }
+
+        guard refreshHistoryEntry else { return }
+        recordActivation(for: item, deferUIWork: shouldPaste)
+    }
+
+    private func writeImageToPasteboard(
+        item: ClipboardItem,
+        signature: String,
+        shouldPaste: Bool,
+        refreshHistoryEntry: Bool
+    ) {
+        if !pasteboardAlreadyContains(signature: signature) {
+            pasteboard.clearContents()
+
+            let pasteboardItem = NSPasteboardItem()
+            let provider = LazyImagePasteboardDataProvider(imageData: item.imageData, imageDiskPath: item.imageDiskPath)
+            pasteboardItem.setDataProvider(provider, forTypes: [.tiff])
+
+            if pasteboard.writeObjects([pasteboardItem]) {
+                lastChangeCount = pasteboard.changeCount
+                lastWrittenPasteboardSignature = signature
+            }
+        }
+
+        if shouldPaste {
+            schedulePasteShortcut()
+        }
+
+        guard refreshHistoryEntry else { return }
+        recordActivation(for: item, deferUIWork: shouldPaste)
     }
 
     private func recordActivation(for item: ClipboardItem, deferUIWork: Bool) {
@@ -1509,6 +1762,95 @@ final class ClipboardManager: ObservableObject {
             DispatchQueue.main.async(execute: applyActivation)
         } else {
             applyActivation()
+        }
+    }
+
+    private func cgImage(from image: NSImage) -> CGImage? {
+        var proposedRect = CGRect(origin: .zero, size: image.size)
+        if let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) {
+            return cgImage
+        }
+
+        guard let imageData = image.tiffRepresentation,
+              let imageRep = NSBitmapImageRep(data: imageData) else {
+            return nil
+        }
+        return imageRep.cgImage
+    }
+
+    private static func issuePasteShortcut(targetProcessIdentifier: pid_t?) {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        guard AXIsProcessTrustedWithOptions(options) else { return }
+
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
+        let keyCode = CGKeyCode(kVK_ANSI_V)
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+        keyDown?.flags = CGEventFlags.maskCommand
+        keyUp?.flags = CGEventFlags.maskCommand
+
+        if let targetProcessIdentifier {
+            keyDown?.postToPid(targetProcessIdentifier)
+            keyUp?.postToPid(targetProcessIdentifier)
+        } else {
+            keyDown?.post(tap: CGEventTapLocation.cghidEventTap)
+            keyUp?.post(tap: CGEventTapLocation.cghidEventTap)
+        }
+    }
+
+    private static func visibleApplicationBelowQuickTray(excluding currentProcessIdentifier: pid_t) -> NSRunningApplication? {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windowInfoList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        for windowInfo in windowInfoList {
+            guard let ownerProcessIdentifier = windowInfo[kCGWindowOwnerPID as String] as? pid_t else { continue }
+            guard ownerProcessIdentifier != currentProcessIdentifier else { continue }
+            guard let layer = windowInfo[kCGWindowLayer as String] as? Int, layer == 0 else { continue }
+            guard let application = NSRunningApplication(processIdentifier: ownerProcessIdentifier) else { continue }
+            return application
+        }
+
+        return nil
+    }
+
+    private static func isTypelessProcess(_ processIdentifier: pid_t) -> Bool {
+        guard processIdentifier > 0 else { return false }
+        guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return false }
+
+        if application.bundleIdentifier == AppSettings.typelessBundleIdentifier {
+            return true
+        }
+
+        if application.localizedName?.localizedCaseInsensitiveContains("Typeless") == true {
+            return true
+        }
+
+        let candidatePaths = [
+            application.bundleURL?.path,
+            application.executableURL?.path
+        ]
+
+        return candidatePaths.contains { path in
+            guard let path else { return false }
+            return path.localizedCaseInsensitiveContains("/Typeless.app/")
+                || path.localizedCaseInsensitiveContains("/Typeless Helper")
+        }
+    }
+
+    private static func isTypelessRunning() -> Bool {
+        NSWorkspace.shared.runningApplications.contains { application in
+            if application.bundleIdentifier == AppSettings.typelessBundleIdentifier {
+                return true
+            }
+
+            if application.localizedName?.localizedCaseInsensitiveContains("Typeless") == true {
+                return true
+            }
+
+            return application.bundleURL?.path.localizedCaseInsensitiveContains("/Typeless.app") == true
+                || application.executableURL?.path.localizedCaseInsensitiveContains("/Typeless.app/") == true
         }
     }
 
@@ -1571,7 +1913,7 @@ final class ClipboardManager: ObservableObject {
         trimUnpinnedItemsToLimit()
     }
 
-    private func normalize(_ value: String) -> String {
+    static func normalize(_ value: String) -> String {
         value
             .folding(options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive], locale: .current)
             .lowercased()
@@ -1579,7 +1921,7 @@ final class ClipboardManager: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func tokenizedWords(_ value: String) -> [String] {
+    static func tokenizedWords(_ value: String) -> [String] {
         normalize(value)
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
@@ -1751,9 +2093,7 @@ final class ClipboardManager: ObservableObject {
 
         for (index, imageItem) in imageItems.enumerated() {
             if index < Self.imageRAMItemLimit {
-                if imageItem.imageData == nil, let imagePayload = imageItem.imagePayloadData {
-                    imageItem.setImageDataInMemory(imagePayload)
-                }
+                continue
             } else {
                 imageItem.setImageDataInMemory(nil)
                 imageItem.clearImageCache()
@@ -1830,39 +2170,32 @@ final class ClipboardManager: ObservableObject {
         }
         return String(data: prettyData, encoding: .utf8)
     }
+}
 
-    private func cgImage(from image: NSImage) -> CGImage? {
-        var proposedRect = CGRect(origin: .zero, size: image.size)
-        if let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) {
-            return cgImage
-        }
+private final class LazyImagePasteboardDataProvider: NSObject, NSPasteboardItemDataProvider {
+    private let imageData: Data?
+    private let imageDiskPath: String?
 
-        guard let imageData = image.tiffRepresentation,
-              let imageRep = NSBitmapImageRep(data: imageData) else {
-            return nil
-        }
-        return imageRep.cgImage
+    init(imageData: Data?, imageDiskPath: String?) {
+        self.imageData = imageData
+        self.imageDiskPath = imageDiskPath
     }
 
-    private static func issuePasteShortcut(targetProcessIdentifier: pid_t?) {
-        if !AXIsProcessTrusted() {
-            let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true] as CFDictionary
-            guard AXIsProcessTrustedWithOptions(options) else { return }
+    func pasteboard(
+        _ pasteboard: NSPasteboard?,
+        item: NSPasteboardItem,
+        provideDataForType type: NSPasteboard.PasteboardType
+    ) {
+        guard type == .tiff else { return }
+
+        if let imageData {
+            item.setData(imageData, forType: type)
+            return
         }
 
-        guard let source = CGEventSource(stateID: .combinedSessionState) else { return }
-        let keyCode = CGKeyCode(kVK_ANSI_V)
-        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true)
-        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-        keyDown?.flags = CGEventFlags.maskCommand
-        keyUp?.flags = CGEventFlags.maskCommand
-
-        if let targetProcessIdentifier {
-            keyDown?.postToPid(targetProcessIdentifier)
-            keyUp?.postToPid(targetProcessIdentifier)
-        } else {
-            keyDown?.post(tap: CGEventTapLocation.cghidEventTap)
-            keyUp?.post(tap: CGEventTapLocation.cghidEventTap)
-        }
+        guard let imageDiskPath else { return }
+        let url = URL(fileURLWithPath: imageDiskPath)
+        guard let data = try? Data(contentsOf: url) else { return }
+        item.setData(data, forType: type)
     }
 }
