@@ -22,8 +22,6 @@ struct LauncherView: View {
     @State private var showSettings = false
     @State private var showSettingsFromHoldKey = false
     @State private var showNewTemplateSheet = false
-    @State private var showOnboarding = false
-    @State private var onboardingStep = 0
     @FocusState private var isSearchFocused: Bool
 
     @State private var localEventMonitor: Any?
@@ -179,9 +177,6 @@ struct LauncherView: View {
         .onAppear {
             syncSelection()
             setupEventMonitor()
-            if !settings.hasCompletedOnboarding {
-                showOnboarding = true
-            }
         }
         .onDisappear {
             if let monitor = localEventMonitor {
@@ -204,18 +199,8 @@ struct LauncherView: View {
             selectedItemIDs = []
             selectedSnippetID = nil
             syncSelection()
-            if !settings.hasCompletedOnboarding {
-                onboardingStep = 0
-                showOnboarding = true
-            }
             if settings.focusSearchOnOpen {
                 isSearchFocused = true
-            }
-        }
-        .overlay {
-            if showOnboarding {
-                onboardingOverlay
-                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
             }
         }
     }
@@ -778,154 +763,6 @@ struct LauncherView: View {
         }
     }
 
-    private var onboardingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.48)
-                .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(onboardingPage.title)
-                            .font(.system(size: 28, weight: .black, design: .rounded))
-                            .foregroundStyle(.white)
-                        Text(onboardingPage.subtitle)
-                            .font(.system(size: 14, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.74))
-                    }
-
-                    Spacer()
-
-                    Button {
-                        finishOnboarding()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 12, weight: .black))
-                            .foregroundStyle(.white.opacity(0.8))
-                            .frame(width: 34, height: 34)
-                            .background(.white.opacity(0.08), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                HStack(spacing: 14) {
-                    ForEach(Array(onboardingPages.enumerated()), id: \.offset) { index, page in
-                        OnboardingStepCard(
-                            page: page,
-                            isActive: index == onboardingStep
-                        )
-                        .onTapGesture {
-                            onboardingStep = index
-                        }
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(onboardingPage.points, id: \.self) { point in
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Color(red: 0.95, green: 0.72, blue: 0.34))
-                            Text(point)
-                                .font(.system(size: 14, weight: .medium, design: .rounded))
-                                .foregroundStyle(.white.opacity(0.88))
-                        }
-                    }
-                }
-                .padding(18)
-                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Visible every time you need it")
-                        .font(.system(size: 13, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-
-                    HStack(spacing: 12) {
-                        ShortcutHint(text: "Toggle launcher: \(settings.toggleShortcutLabel)")
-                        ShortcutHint(text: "Menu bar icon opens the same window")
-                        ShortcutHint(text: "Help button reopens this guide")
-                    }
-                }
-
-                HStack {
-                    Toggle("Open QuickTray window automatically on startup", isOn: $settings.showLauncherOnStartup)
-                        .toggleStyle(.switch)
-                        .tint(.white.opacity(0.84))
-                        .foregroundStyle(.white.opacity(0.82))
-
-                    Spacer()
-
-                    if onboardingStep > 0 {
-                        Button("Back") {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                                onboardingStep -= 1
-                            }
-                        }
-                        .buttonStyle(QuickGlassButtonStyle())
-                    }
-
-                    Button(onboardingStep == onboardingPages.count - 1 ? "Start Using QuickTray" : "Next") {
-                        if onboardingStep == onboardingPages.count - 1 {
-                            finishOnboarding()
-                        } else {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                                onboardingStep += 1
-                            }
-                        }
-                    }
-                    .buttonStyle(QuickGlassButtonStyle(fill: Color.white.opacity(0.18)))
-                }
-            }
-            .padding(24)
-            .frame(width: 760)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(red: 0.12, green: 0.14, blue: 0.17).opacity(0.96))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
-                    )
-            )
-            .shadow(color: .black.opacity(0.35), radius: 28, y: 20)
-        }
-    }
-
-    private var onboardingPages: [OnboardingPage] {
-        [
-            OnboardingPage(
-                title: "QuickTray opens as a floating clipboard window",
-                subtitle: "You should never have to guess where the app went.",
-                points: [
-                    "On first launch, this window opens automatically so you can immediately see the app.",
-                    "After onboarding, you can reopen it at any time with \(settings.toggleShortcutLabel) or by clicking the menu bar tray icon.",
-                    "If you prefer, keep 'Open QuickTray window automatically on startup' enabled so the window appears every launch."
-                ]
-            ),
-            OnboardingPage(
-                title: "Copy anything and it lands here",
-                subtitle: "Text, images, documents, folders, and video files all show up in one place.",
-                points: [
-                    "The default view is All, so new users always see everything first.",
-                    "Use the tabs to jump into Text, Images, Video, Docs, or Files.",
-                    "If Quick Look cannot preview a file, QuickTray shows the icon of the default app that opens it."
-                ]
-            ),
-            OnboardingPage(
-                title: "The fastest path is keyboard-first",
-                subtitle: "You can still click around, but the speed comes from the shortcuts.",
-                points: [
-                    "Arrow keys move selection, Return pastes, and Shift+Return pastes plain text.",
-                    "Set the default paste mode in Settings. Right-click images to run OCR where you need it.",
-                    "Command-click multiple items, then right-click to create a stack in the order shown.",
-                    "Use ⌥⌘2-5 for quick recent paste, and ⌥⇧⌘V to paste your captured stack in copy order."
-                ]
-            )
-        ]
-    }
-
-    private var onboardingPage: OnboardingPage {
-        onboardingPages[min(max(onboardingStep, 0), onboardingPages.count - 1)]
-    }
-
     private func syncSelection() {
         if clipboardManager.selectedCategory == .snippets {
             selectedItemID = nil
@@ -1028,10 +865,6 @@ struct LauncherView: View {
     }
 
     private func handleModifierFlagsChanged(_ event: NSEvent) {
-        if showOnboarding {
-            return
-        }
-
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let shouldShowFromHold = modifiers == .command || modifiers == .control
 
@@ -1049,7 +882,6 @@ struct LauncherView: View {
 
         let workItem = DispatchWorkItem {
             settingsRevealWorkItem = nil
-            guard !showOnboarding else { return }
             showSettingsFromHoldKey = true
             withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
                 showSettings = true
@@ -1072,26 +904,6 @@ struct LauncherView: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
-        if showOnboarding {
-            switch Int(event.keyCode) {
-            case kVK_Escape:
-                finishOnboarding()
-                return true
-            case kVK_Return, kVK_RightArrow:
-                if onboardingStep == onboardingPages.count - 1 {
-                    finishOnboarding()
-                } else {
-                    onboardingStep += 1
-                }
-                return true
-            case kVK_LeftArrow:
-                onboardingStep = max(onboardingStep - 1, 0)
-                return true
-            default:
-                return false
-            }
-        }
-
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if modifiers.contains(.command) {
@@ -1382,18 +1194,6 @@ struct LauncherView: View {
         }
     }
 
-    private func finishOnboarding() {
-        settings.completeOnboarding()
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-            showOnboarding = false
-        }
-    }
-}
-
-private struct OnboardingPage {
-    let title: String
-    let subtitle: String
-    let points: [String]
 }
 
 private struct LauncherBackdrop: View {
@@ -1424,48 +1224,6 @@ private struct BlurEffectView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.alphaValue = opacity
-    }
-}
-
-private struct ShortcutHint: View {
-    let text: String
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(.white.opacity(0.5))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
-    }
-}
-
-private struct OnboardingStepCard: View {
-    let page: OnboardingPage
-    let isActive: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(page.title)
-                .lineLimit(2)
-                .font(.system(size: 15, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-
-            Text(page.subtitle)
-                .lineLimit(3)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.6))
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(isActive ? Color.white.opacity(0.14) : Color.white.opacity(0.05))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(isActive ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
-                )
-        )
     }
 }
 

@@ -10,6 +10,7 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
     private static let dragProtectionTimeout: TimeInterval = 0.75
 
     private let clipboardManager: ClipboardManager
+    private let settings: AppSettings
     private let onChoose: (ClipboardItem) -> Void
     private let panel: NSPanel
     private var hostingController: NSHostingController<QuickPasteStripView>?
@@ -17,8 +18,9 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
     private var dragProtectionTimeoutWorkItem: DispatchWorkItem?
     private var dragProtectionMouseUpMonitor: Any?
 
-    init(clipboardManager: ClipboardManager, onChoose: @escaping (ClipboardItem) -> Void) {
+    init(clipboardManager: ClipboardManager, settings: AppSettings, onChoose: @escaping (ClipboardItem) -> Void) {
         self.clipboardManager = clipboardManager
+        self.settings = settings
         self.onChoose = onChoose
 
         let panel = QuickPasteStripPanel(
@@ -62,13 +64,18 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
         let rootView = QuickPasteStripView(
             clipboardManager: clipboardManager,
             items: items,
-            shortcutLabel: shortcutLabel,
             onChoose: { [weak self] item in
-                self?.hide()
                 self?.onChoose(item)
+                self?.hide()
             },
             onStartDrag: { [weak self] in
                 self?.beginDragProtection()
+            },
+            onEndDrag: { [weak self] in
+                self?.endDragProtection()
+            },
+            onSuccessfulDrop: { [weak self] in
+                self?.hide()
             },
             onClose: { [weak self] in
                 self?.hide()
@@ -94,17 +101,7 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
             + (spacing * CGFloat(max(items.count - 1, 0)))
             + horizontalPadding
 
-        let referenceScreen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
-        let visibleFrame = referenceScreen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let width = min(max(calculatedWidth, 300), max(visibleFrame.width - 40, 300))
-        let height: CGFloat = 144
-
-        let origin = CGPoint(
-            x: visibleFrame.midX - (width / 2),
-            y: visibleFrame.minY + 52
-        )
-
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
+        positionPanel(calculatedWidth: calculatedWidth, height: 144)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         panel.invalidateShadow()
@@ -114,9 +111,41 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
         panel.orderOut(nil)
     }
 
+    func windowDidMove(_ notification: Notification) {
+        settings.setHoldChooserWindowOrigin(panel.frame.origin)
+    }
+
     func windowDidResignKey(_ notification: Notification) {
         guard !dragProtectionActive else { return }
         hide()
+    }
+
+    private func positionPanel(calculatedWidth: CGFloat, height: CGFloat) {
+        let savedOrigin = settings.holdChooserWindowOrigin()
+        let referenceSize = NSSize(width: max(calculatedWidth, 300), height: height)
+        let referenceScreen = savedOrigin.flatMap { origin in
+            NSScreen.screens.first { $0.visibleFrame.intersects(NSRect(origin: origin, size: referenceSize)) }
+        }
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+            ?? NSScreen.main
+        let visibleFrame = referenceScreen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let width = min(max(calculatedWidth, 300), max(visibleFrame.width - 40, 300))
+        let size = NSSize(width: width, height: height)
+
+        let origin: CGPoint
+        if let savedOrigin {
+            origin = CGPoint(
+                x: min(max(savedOrigin.x, visibleFrame.minX), max(visibleFrame.maxX - size.width, visibleFrame.minX)),
+                y: min(max(savedOrigin.y, visibleFrame.minY), max(visibleFrame.maxY - size.height, visibleFrame.minY))
+            )
+        } else {
+            origin = CGPoint(
+                x: visibleFrame.midX - (size.width / 2),
+                y: visibleFrame.minY + 52
+            )
+        }
+
+        panel.setFrame(NSRect(origin: origin, size: size), display: true)
     }
 
     private func beginDragProtection() {
@@ -134,10 +163,6 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
         dragProtectionTimeoutWorkItem?.cancel()
         dragProtectionTimeoutWorkItem = nil
         dragProtectionActive = false
-
-        if !panel.isKeyWindow && panel.isVisible {
-            hide()
-        }
     }
 
     private func installDragProtectionMonitor() {
@@ -156,9 +181,10 @@ final class QuickPasteStripController: NSWindowController, NSWindowDelegate {
 private struct QuickPasteStripView: View {
     @ObservedObject var clipboardManager: ClipboardManager
     let items: [ClipboardItem]
-    let shortcutLabel: String
     let onChoose: (ClipboardItem) -> Void
     let onStartDrag: () -> Void
+    let onEndDrag: () -> Void
+    let onSuccessfulDrop: () -> Void
     let onClose: () -> Void
 
     var body: some View {
@@ -172,16 +198,17 @@ private struct QuickPasteStripView: View {
                 .shadow(color: .black.opacity(0.45), radius: 18, y: 6)
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Hold \(shortcutLabel) chooser")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.68))
+                HStack(spacing: 10) {
+                    ZStack(alignment: .leading) {
+                        QuickPasteStripWindowDragHandle()
 
-                    Text("Double-click on an item to paste.")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.5))
+                        Text("double-click or drag/drop an item to paste")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .allowsHitTesting(false)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
 
-                    Spacer()
                     Button(action: onClose) {
                         Image(systemName: "xmark")
                             .font(.system(size: 10, weight: .bold))
@@ -199,6 +226,8 @@ private struct QuickPasteStripView: View {
                                 item: item,
                                 previewImage: clipboardManager.previewImage(for: item),
                                 onStartDrag: onStartDrag,
+                                onEndDrag: onEndDrag,
+                                onSuccessfulDrop: onSuccessfulDrop,
                                 onChoose: { onChoose(item) }
                             )
                         }
@@ -211,11 +240,67 @@ private struct QuickPasteStripView: View {
     }
 }
 
+private struct QuickPasteStripWindowDragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> QuickPasteStripWindowDragHandleView {
+        QuickPasteStripWindowDragHandleView()
+    }
+
+    func updateNSView(_ nsView: QuickPasteStripWindowDragHandleView, context: Context) {}
+}
+
+private final class QuickPasteStripWindowDragHandleView: NSView {
+    private var dragStartScreenPoint: CGPoint?
+    private var dragStartWindowOrigin: CGPoint?
+
+    override func mouseDown(with event: NSEvent) {
+        dragStartScreenPoint = NSEvent.mouseLocation
+        dragStartWindowOrigin = window?.frame.origin
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window, let dragStartScreenPoint, let dragStartWindowOrigin else { return }
+
+        let currentScreenPoint = NSEvent.mouseLocation
+        let newOrigin = CGPoint(
+            x: dragStartWindowOrigin.x + currentScreenPoint.x - dragStartScreenPoint.x,
+            y: dragStartWindowOrigin.y + currentScreenPoint.y - dragStartScreenPoint.y
+        )
+        window.setFrameOrigin(newOrigin)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartScreenPoint = nil
+        dragStartWindowOrigin = nil
+    }
+}
+
 private struct QuickPasteStripTile: View {
     let item: ClipboardItem
     let previewImage: NSImage?
     let onStartDrag: () -> Void
+    let onEndDrag: () -> Void
+    let onSuccessfulDrop: () -> Void
     let onChoose: () -> Void
+
+    var body: some View {
+        QuickPasteStripTileContent(item: item, previewImage: previewImage)
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                QuickPasteStripTileDragSource(
+                    item: item,
+                    previewImage: previewImage,
+                    onStartDrag: onStartDrag,
+                    onEndDrag: onEndDrag,
+                    onSuccessfulDrop: onSuccessfulDrop,
+                    onChoose: onChoose
+                )
+            }
+    }
+}
+
+private struct QuickPasteStripTileContent: View {
+    let item: ClipboardItem
+    let previewImage: NSImage?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -253,18 +338,6 @@ private struct QuickPasteStripTile: View {
         }
         .padding(4)
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .simultaneousGesture(
-            TapGesture(count: 2)
-                .onEnded(onChoose)
-        )
-        .onDrag {
-            onStartDrag()
-            return item.dragItemProvider() ?? NSItemProvider()
-        } preview: {
-            Color.clear
-                .frame(width: 1, height: 1)
-        }
     }
 
     private var iconName: String {
@@ -292,5 +365,175 @@ private struct QuickPasteStripTile: View {
 
     private var caption: String {
         item.kind == .text ? "Text" : item.title
+    }
+}
+
+private struct QuickPasteStripTileDragSource: NSViewRepresentable {
+    let item: ClipboardItem
+    let previewImage: NSImage?
+    let onStartDrag: () -> Void
+    let onEndDrag: () -> Void
+    let onSuccessfulDrop: () -> Void
+    let onChoose: () -> Void
+
+    func makeNSView(context: Context) -> QuickPasteStripTileDragSourceView {
+        QuickPasteStripTileDragSourceView(
+            item: item,
+            previewImage: previewImage,
+            onStartDrag: onStartDrag,
+            onEndDrag: onEndDrag,
+            onSuccessfulDrop: onSuccessfulDrop,
+            onChoose: onChoose
+        )
+    }
+
+    func updateNSView(_ nsView: QuickPasteStripTileDragSourceView, context: Context) {
+        nsView.item = item
+        nsView.previewImage = previewImage
+        nsView.onStartDrag = onStartDrag
+        nsView.onEndDrag = onEndDrag
+        nsView.onSuccessfulDrop = onSuccessfulDrop
+        nsView.onChoose = onChoose
+    }
+}
+
+private final class QuickPasteStripTileDragSourceView: NSView, NSDraggingSource {
+    private static let dragDistanceThreshold: CGFloat = 4
+    private static let dragPreviewSize = NSSize(width: 108, height: 96)
+
+    var item: ClipboardItem
+    var previewImage: NSImage?
+    var onStartDrag: () -> Void
+    var onEndDrag: () -> Void
+    var onSuccessfulDrop: () -> Void
+    var onChoose: () -> Void
+
+    private var mouseDownEvent: NSEvent?
+    private var isDragging = false
+
+    init(
+        item: ClipboardItem,
+        previewImage: NSImage?,
+        onStartDrag: @escaping () -> Void,
+        onEndDrag: @escaping () -> Void,
+        onSuccessfulDrop: @escaping () -> Void,
+        onChoose: @escaping () -> Void
+    ) {
+        self.item = item
+        self.previewImage = previewImage
+        self.onStartDrag = onStartDrag
+        self.onEndDrag = onEndDrag
+        self.onSuccessfulDrop = onSuccessfulDrop
+        self.onChoose = onChoose
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard event.clickCount < 2 else {
+            mouseDownEvent = nil
+            onChoose()
+            return
+        }
+
+        mouseDownEvent = event
+        isDragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !isDragging, let mouseDownEvent else { return }
+        let currentPoint = convert(event.locationInWindow, from: nil)
+        let startPoint = convert(mouseDownEvent.locationInWindow, from: nil)
+        let distance = hypot(currentPoint.x - startPoint.x, currentPoint.y - startPoint.y)
+        guard distance >= Self.dragDistanceThreshold else { return }
+        beginDrag(with: mouseDownEvent)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        mouseDownEvent = nil
+        isDragging = false
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .copy
+    }
+
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        mouseDownEvent = nil
+        isDragging = false
+        onEndDrag()
+        if !operation.isEmpty {
+            onSuccessfulDrop()
+        }
+    }
+
+    private func beginDrag(with event: NSEvent) {
+        guard let pasteboardWriter = item.quickPasteStripDragPasteboardWriter else { return }
+
+        isDragging = true
+        onStartDrag()
+
+        let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardWriter)
+        let draggingFrame = NSRect(
+            x: bounds.midX - (Self.dragPreviewSize.width / 2),
+            y: bounds.midY - (Self.dragPreviewSize.height / 2),
+            width: Self.dragPreviewSize.width,
+            height: Self.dragPreviewSize.height
+        )
+        let dragImage = Self.makeDragPreviewImage(item: item, previewImage: previewImage)
+        draggingItem.setDraggingFrame(draggingFrame, contents: dragImage)
+
+        let session = beginDraggingSession(with: [draggingItem], event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = false
+    }
+
+    private static func makeDragPreviewImage(item: ClipboardItem, previewImage: NSImage?) -> NSImage {
+        let hostingView = NSHostingView(
+            rootView: QuickPasteStripTileContent(item: item, previewImage: previewImage)
+                .frame(width: dragPreviewSize.width, height: dragPreviewSize.height)
+                .opacity(0.48)
+        )
+        hostingView.frame = NSRect(origin: .zero, size: dragPreviewSize)
+        hostingView.layoutSubtreeIfNeeded()
+
+        guard let bitmap = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else {
+            return NSImage(size: dragPreviewSize)
+        }
+
+        hostingView.cacheDisplay(in: hostingView.bounds, to: bitmap)
+        let image = NSImage(size: dragPreviewSize)
+        image.addRepresentation(bitmap)
+        return image
+    }
+}
+
+private extension ClipboardItem {
+    var quickPasteStripDragPasteboardWriter: NSPasteboardWriting? {
+        switch kind {
+        case .text:
+            guard let textContent else { return nil }
+            let pasteboardItem = NSPasteboardItem()
+            pasteboardItem.setString(textContent, forType: .string)
+            if let richTextData {
+                pasteboardItem.setData(richTextData, forType: .rtf)
+            }
+            if let htmlData {
+                pasteboardItem.setData(htmlData, forType: .html)
+            }
+            return pasteboardItem
+        case .image:
+            guard let imagePayloadData else { return nil }
+            let pasteboardItem = NSPasteboardItem()
+            pasteboardItem.setData(imagePayloadData, forType: .tiff)
+            return pasteboardItem
+        case .file:
+            return fileURL as NSURL?
+        }
     }
 }

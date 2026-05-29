@@ -7,6 +7,16 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 SOURCES=$(find Sources -name '*.swift' | sort)
 OUT_ARM="$BUILD_DIR/$APP_NAME"
 
+RUNNING_APP="/Applications/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+RUNNING_PIDS=$(pgrep -f "$RUNNING_APP" || true)
+if [ -n "$RUNNING_PIDS" ]; then
+    echo "Stopping running $APP_NAME..."
+    for PID in $RUNNING_PIDS; do
+        kill "$PID" 2>/dev/null || true
+    done
+    sleep 1
+fi
+
 echo "Cleaning..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"

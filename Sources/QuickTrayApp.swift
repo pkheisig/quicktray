@@ -14,15 +14,38 @@ struct QuickTrayApp: App {
     }
 }
 
+private enum LegacyDefaultsMigration {
+    private static let legacyDomain = "com.gemini.QuickTray"
+    private static let migrationKey = "settings.migratedLegacyDefaults"
+
+    static func run() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: migrationKey) == nil else { return }
+
+        defer {
+            defaults.set(true, forKey: migrationKey)
+        }
+
+        guard let legacyDefaults = defaults.persistentDomain(forName: legacyDomain) else { return }
+
+        for (key, value) in legacyDefaults where defaults.object(forKey: key) == nil {
+            guard !key.hasPrefix("NSStatusItem ") else { continue }
+            defaults.set(value, forKey: key)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let clipboardManager = ClipboardManager.shared
-    private let settings = AppSettings.shared
-    private var statusItem: NSStatusItem?
+    private let defaultsMigration: Void = LegacyDefaultsMigration.run()
+    private lazy var clipboardManager = ClipboardManager.shared
+    private lazy var settings = AppSettings.shared
+    private var statusBarController: StatusBarController?
     private var panelController: LauncherPanelController?
     private var quickPasteStripController: QuickPasteStripController?
     private var cancellables: Set<AnyCancellable> = []
     private var launcherHotKeyHoldWorkItem: DispatchWorkItem?
     private var launcherHotKeyDidTriggerLongPress = false
+    private var launcherHotKeyDidDismissQuickPasteStrip = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -46,58 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusItem() {
-        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let icon = statusBarIcon()
-        statusItem.button?.image = icon
-        statusItem.button?.imagePosition = .imageOnly
-        statusItem.button?.imageScaling = .scaleProportionallyDown
-        statusItem.button?.toolTip = "QuickTray"
-
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open App", action: #selector(menuOpenApp), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Close App", action: #selector(menuCloseApp), keyEquivalent: ""))
-
-        for item in menu.items {
-            item.target = self
-        }
-
-        statusItem.menu = menu
-        self.statusItem = statusItem
-    }
-
-    private func statusBarIcon() -> NSImage {
-        if let icon = NSImage(systemSymbolName: "tray.full.fill", accessibilityDescription: "QuickTray") {
-            icon.size = NSSize(width: 18, height: 18)
-            icon.isTemplate = true
-            return icon
-        }
-
-        let icon = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { rect in
-            let inset = rect.insetBy(dx: 1, dy: 2)
-            let tray = NSBezierPath()
-            tray.move(to: NSPoint(x: inset.minX, y: inset.minY + 4))
-            tray.line(to: NSPoint(x: inset.minX + 3, y: inset.minY))
-            tray.line(to: NSPoint(x: inset.maxX - 3, y: inset.minY))
-            tray.line(to: NSPoint(x: inset.maxX, y: inset.minY + 4))
-            tray.line(to: NSPoint(x: inset.maxX, y: inset.maxY))
-            tray.line(to: NSPoint(x: inset.minX, y: inset.maxY))
-            tray.close()
-            NSColor.black.setStroke()
-            tray.lineWidth = 1.3
-            tray.stroke()
-            let shelf = NSBezierPath()
-            shelf.move(to: NSPoint(x: inset.minX, y: inset.minY + 4))
-            shelf.line(to: NSPoint(x: inset.minX + 5, y: inset.minY + 4))
-            shelf.line(to: NSPoint(x: inset.minX + 6, y: inset.minY + 6.5))
-            shelf.line(to: NSPoint(x: inset.maxX - 6, y: inset.minY + 6.5))
-            shelf.line(to: NSPoint(x: inset.maxX - 5, y: inset.minY + 4))
-            shelf.line(to: NSPoint(x: inset.maxX, y: inset.minY + 4))
-            shelf.lineWidth = 1.0
-            shelf.stroke()
-            return true
-        }
-        icon.isTemplate = true
-        return icon
+        statusBarController = StatusBarController(
+            openApp: { [weak self] in
+                self?.clipboardManager.capturePasteTargetApplication()
+                self?.panelController?.show()
+            },
+            closeApp: {
+                NSApp.terminate(nil)
+            }
+        )
     }
 
     private func configureLauncherPanel() {
@@ -107,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureQuickPasteStrip() {
         quickPasteStripController = QuickPasteStripController(
             clipboardManager: clipboardManager,
+            settings: settings,
             onChoose: { [weak self] item in
                 self?.clipboardManager.capturePasteTargetApplication()
                 self?.clipboardManager.copyToClipboard(item: item, shouldPaste: true, refreshHistoryEntry: false)
@@ -193,17 +174,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController?.toggle()
     }
 
-    @objc
-    func menuOpenApp() {
-        clipboardManager.capturePasteTargetApplication()
-        panelController?.show()
-    }
-
-    @objc
-    func menuCloseApp() {
-        NSApp.terminate(nil)
-    }
-
     private func registerLauncherHotKey() {
         HotKeyManager.shared.register(
             id: 1,
@@ -219,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func maybePresentLauncherOnStartup() {
-        guard !settings.hasCompletedOnboarding || settings.showLauncherOnStartup else { return }
+        guard settings.showLauncherOnStartup else { return }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
             self?.clipboardManager.capturePasteTargetApplication()
@@ -229,8 +199,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func beginLauncherHotKeyPress() {
         guard launcherHotKeyHoldWorkItem == nil else { return }
+        if quickPasteStripController?.isVisible == true {
+            quickPasteStripController?.hide()
+            launcherHotKeyDidDismissQuickPasteStrip = true
+            launcherHotKeyDidTriggerLongPress = false
+            return
+        }
+
         clipboardManager.capturePasteTargetApplication()
 
+        launcherHotKeyDidDismissQuickPasteStrip = false
         launcherHotKeyDidTriggerLongPress = false
 
         let workItem = DispatchWorkItem { [weak self] in
@@ -250,14 +228,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         launcherHotKeyHoldWorkItem?.cancel()
         launcherHotKeyHoldWorkItem = nil
 
+        if launcherHotKeyDidDismissQuickPasteStrip {
+            launcherHotKeyDidDismissQuickPasteStrip = false
+            return
+        }
+
         if launcherHotKeyDidTriggerLongPress {
             launcherHotKeyDidTriggerLongPress = false
             return
         }
 
-        if quickPasteStripController?.isVisible == true {
-            quickPasteStripController?.hide()
-        }
         toggleLauncher()
     }
 

@@ -82,8 +82,9 @@ final class AppSettings: ObservableObject {
         static let windowOpacity = "settings.windowOpacity"
         static let launcherWindowOriginX = "settings.launcherWindowOriginX"
         static let launcherWindowOriginY = "settings.launcherWindowOriginY"
+        static let holdChooserWindowOriginX = "settings.holdChooserWindowOriginX"
+        static let holdChooserWindowOriginY = "settings.holdChooserWindowOriginY"
         static let focusSearchOnOpen = "settings.focusSearchOnOpen"
-        static let hasCompletedOnboarding = "settings.hasCompletedOnboarding"
         static let showLauncherOnStartup = "settings.showLauncherOnStartup"
         static let commandVStripItemCount = "settings.commandVStripItemCount"
         static let launcherHoldDuration = "settings.launcherHoldDuration"
@@ -107,12 +108,6 @@ final class AppSettings: ObservableObject {
     @Published var focusSearchOnOpen: Bool {
         didSet {
             UserDefaults.standard.set(focusSearchOnOpen, forKey: Keys.focusSearchOnOpen)
-        }
-    }
-
-    @Published var hasCompletedOnboarding: Bool {
-        didSet {
-            UserDefaults.standard.set(hasCompletedOnboarding, forKey: Keys.hasCompletedOnboarding)
         }
     }
 
@@ -171,7 +166,6 @@ final class AppSettings: ObservableObject {
         toggleModifiers = Self.sanitizedModifiers(savedModifiers ?? Self.defaultToggleModifiers)
         windowOpacity = min(max(savedOpacity ?? Self.defaultWindowOpacity, 0.45), 1.0)
         focusSearchOnOpen = defaults.object(forKey: Keys.focusSearchOnOpen) as? Bool ?? true
-        hasCompletedOnboarding = defaults.object(forKey: Keys.hasCompletedOnboarding) as? Bool ?? false
         showLauncherOnStartup = defaults.object(forKey: Keys.showLauncherOnStartup) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
         let savedCommandVCount = defaults.integer(forKey: Keys.commandVStripItemCount)
@@ -222,6 +216,24 @@ final class AppSettings: ObservableObject {
         )
     }
 
+    func setHoldChooserWindowOrigin(_ origin: CGPoint) {
+        UserDefaults.standard.set(origin.x, forKey: Keys.holdChooserWindowOriginX)
+        UserDefaults.standard.set(origin.y, forKey: Keys.holdChooserWindowOriginY)
+    }
+
+    func holdChooserWindowOrigin() -> CGPoint? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Keys.holdChooserWindowOriginX) != nil,
+              defaults.object(forKey: Keys.holdChooserWindowOriginY) != nil else {
+            return nil
+        }
+
+        return CGPoint(
+            x: defaults.double(forKey: Keys.holdChooserWindowOriginX),
+            y: defaults.double(forKey: Keys.holdChooserWindowOriginY)
+        )
+    }
+
     func includesModifier(_ flag: UInt32) -> Bool {
         (toggleModifiers & flag) != 0
     }
@@ -237,10 +249,8 @@ final class AppSettings: ObservableObject {
         ignoreTypelessTranscriptions = true
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
-    }
-
-    func completeOnboarding() {
-        hasCompletedOnboarding = true
+        UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginX)
+        UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginY)
     }
 
     func label(for keyCode: UInt32, modifiers: UInt32) -> String {
