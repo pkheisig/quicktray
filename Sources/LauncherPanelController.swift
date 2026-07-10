@@ -24,7 +24,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
 
         let panel = FloatingLauncherPanel(
             contentRect: NSRect(x: 0, y: 0, width: 810, height: 560),
-            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
+            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -38,6 +38,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
+        panel.minSize = NSSize(width: 810, height: 560)
 
         self.panel = panel
 

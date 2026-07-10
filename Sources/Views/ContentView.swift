@@ -14,6 +14,8 @@ struct LauncherView: View {
     @State private var selectedItemID: UUID?
     @State private var selectedItemIDs: Set<UUID> = []
     @State private var selectedSnippetID: UUID?
+    @State private var itemIDToReveal: UUID?
+    @State private var snippetIDToReveal: UUID?
     @State private var editingItem: ClipboardItem?
     @State private var formattingItem: ClipboardItem?
     @State private var editingTemplate: SnippetTemplate?
@@ -133,7 +135,7 @@ struct LauncherView: View {
                 }
             }
         }
-        .frame(width: 750, height: 500)
+        .frame(minWidth: 750, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(30)
         .quickLookPreview($quickLookURL)
@@ -681,9 +683,14 @@ struct LauncherView: View {
                             .padding(12)
                         }
                     }
-                    .onChange(of: selectedItemID) { itemID in
+                    .onChange(of: itemIDToReveal) { itemID in
                         guard let itemID else { return }
                         proxy.scrollTo(itemID, anchor: .center)
+                        DispatchQueue.main.async {
+                            if itemIDToReveal == itemID {
+                                itemIDToReveal = nil
+                            }
+                        }
                     }
                 }
             }
@@ -754,9 +761,14 @@ struct LauncherView: View {
                         }
                         .padding(.vertical, 8)
                     }
-                    .onChange(of: selectedSnippetID) { snippetID in
+                    .onChange(of: snippetIDToReveal) { snippetID in
                         guard let snippetID else { return }
                         proxy.scrollTo(snippetID, anchor: .center)
+                        DispatchQueue.main.async {
+                            if snippetIDToReveal == snippetID {
+                                snippetIDToReveal = nil
+                            }
+                        }
                     }
                 }
             }
@@ -1078,6 +1090,7 @@ struct LauncherView: View {
 
             let nextIndex = min(max(currentIndex + step, 0), visibleTemplates.count - 1)
             selectedSnippetID = visibleTemplates[nextIndex].id
+            snippetIDToReveal = visibleTemplates[nextIndex].id
             return
         }
 
@@ -1090,6 +1103,7 @@ struct LauncherView: View {
         let nextIndex = min(max(currentIndex + step, 0), visibleItems.count - 1)
         selectedItemID = visibleItems[nextIndex].id
         selectedItemIDs = [visibleItems[nextIndex].id]
+        itemIDToReveal = visibleItems[nextIndex].id
     }
 
     private func selectItem(_ item: ClipboardItem) {
@@ -1402,7 +1416,7 @@ private struct LauncherCompactCard: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+        .background(rowBackgroundColor)
         .contentShape(Rectangle())
         .simultaneousGesture(
             TapGesture()
@@ -1419,6 +1433,13 @@ private struct LauncherCompactCard: View {
             Color.clear
                 .frame(width: 1, height: 1)
         }
+    }
+
+    private var rowBackgroundColor: Color {
+        if item.isPinned {
+            return Color.orange.opacity(isSelected ? 0.20 : 0.10)
+        }
+        return isSelected ? Color.white.opacity(0.1) : Color.clear
     }
 }
 
@@ -1480,7 +1501,7 @@ private struct LauncherListCard: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
+        .background(rowBackgroundColor)
         .contentShape(Rectangle())
         .simultaneousGesture(
             TapGesture()
@@ -1497,6 +1518,13 @@ private struct LauncherListCard: View {
             Color.clear
                 .frame(width: 1, height: 1)
         }
+    }
+
+    private var rowBackgroundColor: Color {
+        if item.isPinned {
+            return Color.orange.opacity(isSelected ? 0.20 : 0.10)
+        }
+        return isSelected ? Color.white.opacity(0.1) : Color.clear
     }
 }
 
@@ -1546,7 +1574,7 @@ private struct LauncherTileCard: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 8)
         }
-        .background(isSelected ? Color.white.opacity(0.15) : Color.white.opacity(0.05))
+        .background(tileBackgroundColor)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1567,6 +1595,13 @@ private struct LauncherTileCard: View {
             Color.clear
                 .frame(width: 1, height: 1)
         }
+    }
+
+    private var tileBackgroundColor: Color {
+        if item.isPinned {
+            return Color.orange.opacity(isSelected ? 0.24 : 0.14)
+        }
+        return Color.white.opacity(isSelected ? 0.15 : 0.05)
     }
 }
 
