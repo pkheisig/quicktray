@@ -9,6 +9,8 @@ private final class FloatingLauncherPanel: NSPanel {
 
 final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private static let dragProtectionTimeout: TimeInterval = 0.75
+    private static let defaultSize = NSSize(width: 810, height: 560)
+    private static let minimumSize = NSSize(width: 740, height: 520)
 
     private let clipboardManager: ClipboardManager
     private let settings: AppSettings
@@ -23,8 +25,8 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         self.settings = settings
 
         let panel = FloatingLauncherPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 810, height: 560),
-            styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView, .resizable],
+            contentRect: NSRect(origin: .zero, size: Self.defaultSize),
+            styleMask: [.titled, .nonactivatingPanel, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -38,7 +40,18 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
-        panel.minSize = NSSize(width: 810, height: 560)
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.minSize = Self.minimumSize
+
+        if let savedSize = settings.launcherWindowSize() {
+            let restoredSize = NSSize(
+                width: max(savedSize.width, Self.minimumSize.width),
+                height: max(savedSize.height, Self.minimumSize.height)
+            )
+            panel.setFrame(NSRect(origin: panel.frame.origin, size: restoredSize), display: false)
+        }
 
         self.panel = panel
 
@@ -114,6 +127,10 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
 
     func windowDidMove(_ notification: Notification) {
         settings.setLauncherWindowOrigin(panel.frame.origin)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        settings.setLauncherWindowSize(panel.frame.size)
     }
 
     func windowDidResignKey(_ notification: Notification) {

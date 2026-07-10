@@ -17,6 +17,9 @@ final class AppSettings: ObservableObject {
     static let defaultToggleKeyCode = UInt32(kVK_ANSI_V)
     static let defaultToggleModifiers = UInt32(optionKey | cmdKey)
     static let defaultWindowOpacity = 0.92
+    static let defaultSettingsPanelOpacity = 0.73
+    static let minSettingsPanelOpacity = 0.30
+    static let maxSettingsPanelOpacity = 1.0
     static let defaultCommandVStripItemCount = 5
     static let minCommandVStripItemCount = 2
     static let maxCommandVStripItemCount = 10
@@ -80,8 +83,11 @@ final class AppSettings: ObservableObject {
         static let toggleKeyCode = "settings.toggleKeyCode"
         static let toggleModifiers = "settings.toggleModifiers"
         static let windowOpacity = "settings.windowOpacity"
+        static let settingsPanelOpacity = "settings.settingsPanelOpacity"
         static let launcherWindowOriginX = "settings.launcherWindowOriginX"
         static let launcherWindowOriginY = "settings.launcherWindowOriginY"
+        static let launcherWindowWidth = "settings.launcherWindowWidth"
+        static let launcherWindowHeight = "settings.launcherWindowHeight"
         static let holdChooserWindowOriginX = "settings.holdChooserWindowOriginX"
         static let holdChooserWindowOriginY = "settings.holdChooserWindowOriginY"
         static let focusSearchOnOpen = "settings.focusSearchOnOpen"
@@ -102,6 +108,17 @@ final class AppSettings: ObservableObject {
     @Published var windowOpacity: Double {
         didSet {
             UserDefaults.standard.set(windowOpacity, forKey: Keys.windowOpacity)
+        }
+    }
+
+    @Published var settingsPanelOpacity: Double {
+        didSet {
+            let clamped = Self.clampedSettingsPanelOpacity(settingsPanelOpacity)
+            if clamped != settingsPanelOpacity {
+                settingsPanelOpacity = clamped
+                return
+            }
+            UserDefaults.standard.set(settingsPanelOpacity, forKey: Keys.settingsPanelOpacity)
         }
     }
 
@@ -161,10 +178,12 @@ final class AppSettings: ObservableObject {
         let savedKeyCode = defaults.object(forKey: Keys.toggleKeyCode) != nil ? UInt32(defaults.integer(forKey: Keys.toggleKeyCode)) : nil
         let savedModifiers = defaults.object(forKey: Keys.toggleModifiers) != nil ? UInt32(defaults.integer(forKey: Keys.toggleModifiers)) : nil
         let savedOpacity = defaults.object(forKey: Keys.windowOpacity) as? Double
+        let savedSettingsPanelOpacity = defaults.object(forKey: Keys.settingsPanelOpacity) as? Double
 
         toggleKeyCode = savedKeyCode ?? Self.defaultToggleKeyCode
         toggleModifiers = Self.sanitizedModifiers(savedModifiers ?? Self.defaultToggleModifiers)
         windowOpacity = min(max(savedOpacity ?? Self.defaultWindowOpacity, 0.45), 1.0)
+        settingsPanelOpacity = Self.clampedSettingsPanelOpacity(savedSettingsPanelOpacity ?? Self.defaultSettingsPanelOpacity)
         focusSearchOnOpen = defaults.object(forKey: Keys.focusSearchOnOpen) as? Bool ?? true
         showLauncherOnStartup = defaults.object(forKey: Keys.showLauncherOnStartup) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -203,6 +222,11 @@ final class AppSettings: ObservableObject {
         UserDefaults.standard.set(origin.y, forKey: Keys.launcherWindowOriginY)
     }
 
+    func setLauncherWindowSize(_ size: CGSize) {
+        UserDefaults.standard.set(size.width, forKey: Keys.launcherWindowWidth)
+        UserDefaults.standard.set(size.height, forKey: Keys.launcherWindowHeight)
+    }
+
     func launcherWindowOrigin() -> CGPoint? {
         let defaults = UserDefaults.standard
         guard defaults.object(forKey: Keys.launcherWindowOriginX) != nil,
@@ -213,6 +237,19 @@ final class AppSettings: ObservableObject {
         return CGPoint(
             x: defaults.double(forKey: Keys.launcherWindowOriginX),
             y: defaults.double(forKey: Keys.launcherWindowOriginY)
+        )
+    }
+
+    func launcherWindowSize() -> CGSize? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: Keys.launcherWindowWidth) != nil,
+              defaults.object(forKey: Keys.launcherWindowHeight) != nil else {
+            return nil
+        }
+
+        return CGSize(
+            width: defaults.double(forKey: Keys.launcherWindowWidth),
+            height: defaults.double(forKey: Keys.launcherWindowHeight)
         )
     }
 
@@ -242,6 +279,7 @@ final class AppSettings: ObservableObject {
         toggleKeyCode = Self.defaultToggleKeyCode
         toggleModifiers = Self.defaultToggleModifiers
         windowOpacity = Self.defaultWindowOpacity
+        settingsPanelOpacity = Self.defaultSettingsPanelOpacity
         focusSearchOnOpen = true
         showLauncherOnStartup = true
         commandVStripItemCount = Self.defaultCommandVStripItemCount
@@ -249,6 +287,8 @@ final class AppSettings: ObservableObject {
         ignoreTypelessTranscriptions = true
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowWidth)
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowHeight)
         UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginY)
     }
@@ -285,5 +325,9 @@ final class AppSettings: ObservableObject {
 
     private static func clampedLauncherHoldDuration(_ value: Double) -> Double {
         min(max(value, minLauncherHoldDuration), maxLauncherHoldDuration)
+    }
+
+    private static func clampedSettingsPanelOpacity(_ value: Double) -> Double {
+        min(max(value, minSettingsPanelOpacity), maxSettingsPanelOpacity)
     }
 }

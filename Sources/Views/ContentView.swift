@@ -22,12 +22,10 @@ struct LauncherView: View {
     @State private var quickLookURL: URL?
     @State private var showClearConfirmation = false
     @State private var showSettings = false
-    @State private var showSettingsFromHoldKey = false
     @State private var showNewTemplateSheet = false
     @FocusState private var isSearchFocused: Bool
 
     @State private var localEventMonitor: Any?
-    @State private var settingsRevealWorkItem: DispatchWorkItem?
 
     private let tileColumns = 3
     private let defaultHistoryLimitOptions = [10, 20, 50, 100, 200]
@@ -106,8 +104,6 @@ struct LauncherView: View {
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        cancelSettingsReveal(hideIfNeeded: false)
-                        showSettingsFromHoldKey = false
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                             showSettings = false
                         }
@@ -121,7 +117,7 @@ struct LauncherView: View {
                             .frame(width: 660, height: 420)
                             .background(
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color.black.opacity(0.62))
+                                    .fill(Color.black.opacity(settings.settingsPanelOpacity))
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                                             .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
@@ -135,7 +131,7 @@ struct LauncherView: View {
                 }
             }
         }
-        .frame(minWidth: 750, maxWidth: .infinity, minHeight: 500, maxHeight: .infinity)
+        .frame(minWidth: 680, maxWidth: .infinity, minHeight: 460, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(30)
         .quickLookPreview($quickLookURL)
@@ -185,8 +181,6 @@ struct LauncherView: View {
                 NSEvent.removeMonitor(monitor)
                 localEventMonitor = nil
             }
-            cancelSettingsReveal(hideIfNeeded: false)
-            showSettingsFromHoldKey = false
             showSettings = false
         }
         .onChange(of: clipboardManager.displayRevision) { _ in
@@ -196,7 +190,6 @@ struct LauncherView: View {
             syncSelection()
         }
         .onReceive(NotificationCenter.default.publisher(for: AppSettings.quickTrayLauncherDidShow)) { _ in
-            showSettingsFromHoldKey = false
             selectedItemID = nil
             selectedItemIDs = []
             selectedSnippetID = nil
@@ -209,15 +202,10 @@ struct LauncherView: View {
 
     private func setupEventMonitor() {
         if localEventMonitor == nil {
-            localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+            localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                 if NSApp.keyWindow == nil {
                     return event
                 }
-                if event.type == .flagsChanged {
-                    handleModifierFlagsChanged(event)
-                    return event
-                }
-                cancelSettingsReveal(hideIfNeeded: false)
                 if handleKeyDown(event) {
                     return nil // consume the event
                 }
@@ -327,7 +315,6 @@ struct LauncherView: View {
             }
 
             Button {
-                showSettingsFromHoldKey = false
                 withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
                     showSettings.toggle()
                 }
@@ -455,6 +442,23 @@ struct LauncherView: View {
                     }
                 }
 
+                settingsSection(title: "Appearance") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Settings transparency: \(Int(((1 - settings.settingsPanelOpacity) * 100).rounded()))%")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.75))
+
+                        Slider(
+                            value: Binding(
+                                get: { 1 - settings.settingsPanelOpacity },
+                                set: { settings.settingsPanelOpacity = 1 - $0 }
+                            ),
+                            in: (1 - AppSettings.maxSettingsPanelOpacity)...(1 - AppSettings.minSettingsPanelOpacity),
+                            step: 0.01
+                        )
+                    }
+                }
+
                 settingsSection(title: "Privacy") {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Ignore Typeless transcriptions", isOn: $settings.ignoreTypelessTranscriptions)
@@ -508,7 +512,7 @@ struct LauncherView: View {
             }
             .padding(16)
         }
-        .background(Color.black.opacity(0.3))
+        .background(Color.clear)
     }
 
     private var tabs: some View {
@@ -872,47 +876,7 @@ struct LauncherView: View {
 
     private func startDraggingSelectedItem() {
         onBeginDrag()
-        showSettingsFromHoldKey = false
         showSettings = false
-    }
-
-    private func handleModifierFlagsChanged(_ event: NSEvent) {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let shouldShowFromHold = modifiers == .command || modifiers == .control
-
-        if shouldShowFromHold {
-            scheduleSettingsRevealFromHold()
-            return
-        }
-
-        cancelSettingsReveal(hideIfNeeded: true)
-    }
-
-    private func scheduleSettingsRevealFromHold() {
-        guard !showSettingsFromHoldKey else { return }
-        guard settingsRevealWorkItem == nil else { return }
-
-        let workItem = DispatchWorkItem {
-            settingsRevealWorkItem = nil
-            showSettingsFromHoldKey = true
-            withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
-                showSettings = true
-            }
-        }
-
-        settingsRevealWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: workItem)
-    }
-
-    private func cancelSettingsReveal(hideIfNeeded: Bool) {
-        settingsRevealWorkItem?.cancel()
-        settingsRevealWorkItem = nil
-
-        guard hideIfNeeded, showSettingsFromHoldKey else { return }
-        showSettingsFromHoldKey = false
-        withAnimation(.spring(response: 0.2, dampingFraction: 0.9)) {
-            showSettings = false
-        }
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
@@ -993,9 +957,10 @@ struct LauncherView: View {
                 clipboardManager.selectedCategory = .snippets
                 return true
             case kVK_ANSI_Comma:
-                showSettingsFromHoldKey = false
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    showSettings.toggle()
+                if !event.isARepeat {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                        showSettings.toggle()
+                    }
                 }
                 return true
             case kVK_ANSI_V:
@@ -1012,7 +977,14 @@ struct LauncherView: View {
 
         switch Int(event.keyCode) {
         case kVK_Escape:
-            onClose()
+            guard !event.isARepeat else { return true }
+            if showSettings {
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                    showSettings = false
+                }
+            } else {
+                onClose()
+            }
             return true
         case kVK_Return:
             if clipboardManager.selectedCategory == .snippets {
@@ -1051,12 +1023,6 @@ struct LauncherView: View {
                 ? 1
                 : (clipboardManager.displayMode == .tiles ? tileColumns : 1)
             moveSelection(step: downStep)
-            return true
-        case kVK_ANSI_S:
-            showSettingsFromHoldKey = false
-            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                showSettings.toggle()
-            }
             return true
         case kVK_ANSI_T:
             if clipboardManager.selectedCategory != .snippets {
