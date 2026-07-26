@@ -10,6 +10,7 @@ struct LauncherView: View {
     let onClose: () -> Void
     let onActivateItem: (ClipboardItem, Bool) -> Void
     let onBeginDrag: () -> Void
+    let shouldHandleKeyEvent: (NSEvent) -> Bool
 
     @State private var selectedItemID: UUID?
     @State private var selectedItemIDs: Set<UUID> = []
@@ -203,9 +204,7 @@ struct LauncherView: View {
     private func setupEventMonitor() {
         if localEventMonitor == nil {
             localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if NSApp.keyWindow == nil {
-                    return event
-                }
+                guard shouldHandleKeyEvent(event) else { return event }
                 if handleKeyDown(event) {
                     return nil // consume the event
                 }
@@ -880,18 +879,98 @@ struct LauncherView: View {
     }
 
     private func handleKeyDown(_ event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let keyCode = Int(event.keyCode)
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let commandOnly = modifiers == .command
+        let commandShift = modifiers == [.command, .shift]
 
-        if modifiers.contains(.command) {
-            switch Int(event.keyCode) {
+        // Attached editor sheets own their keyboard handling. The local event monitor
+        // outlives the panel's visibility, so never route their events to the launcher.
+        if isPresentingSheet {
+            return false
+        }
+
+        if commandOnly, keyCode == kVK_ANSI_Comma {
+            guard !event.isARepeat else { return true }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                showSettings.toggle()
+            }
+            return true
+        }
+
+        // Settings is an overlay inside the launcher window. Do not let its controls
+        // accidentally trigger actions on the clipboard list behind it.
+        if showSettings {
+            if modifiers.isEmpty, keyCode == kVK_Escape {
+                guard !event.isARepeat else { return true }
+                withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
+                    showSettings = false
+                }
+                return true
+            }
+            return false
+        }
+
+        // Preserve native text entry and editing shortcuts. Search keeps only the
+        // launcher-specific navigation keys advertised by the UI.
+        if isSearchFocused {
+            if commandOnly, keyCode == kVK_ANSI_F {
+                return true
+            }
+
+            if modifiers.isEmpty {
+                switch keyCode {
+                case kVK_Escape:
+                    guard !event.isARepeat else { return true }
+                    onClose()
+                    return true
+                case kVK_Return:
+                    if clipboardManager.selectedCategory == .snippets {
+                        pasteSelectedTemplate()
+                    } else {
+                        pasteSelected()
+                    }
+                    return true
+                case kVK_UpArrow:
+                    let step = clipboardManager.selectedCategory == .snippets
+                        ? -1
+                        : (clipboardManager.displayMode == .tiles ? -tileColumns : -1)
+                    moveSelection(step: step)
+                    return true
+                case kVK_DownArrow:
+                    let step = clipboardManager.selectedCategory == .snippets
+                        ? 1
+                        : (clipboardManager.displayMode == .tiles ? tileColumns : 1)
+                    moveSelection(step: step)
+                    return true
+                default:
+                    return false
+                }
+            }
+
+            if modifiers == .shift, keyCode == kVK_Return {
+                if clipboardManager.selectedCategory == .snippets {
+                    pasteSelectedTemplate()
+                } else {
+                    pasteSelected(asPlainText: true)
+                }
+                return true
+            }
+            return false
+        }
+
+        if isTextInputActive {
+            return false
+        }
+
+        if commandOnly {
+            switch keyCode {
             case kVK_ANSI_F:
                 isSearchFocused = true
                 return true
             case kVK_ANSI_C:
                 if clipboardManager.selectedCategory == .snippets {
                     copySelectedTemplate()
-                } else if modifiers.contains(.shift) {
-                    copySelectedPath()
                 } else {
                     copySelected()
                 }
@@ -909,14 +988,13 @@ struct LauncherView: View {
                 }
                 return true
             case kVK_ANSI_P:
+                guard !event.isARepeat else { return true }
                 if clipboardManager.selectedCategory != .snippets, let selectedItem {
                     clipboardManager.togglePin(for: selectedItem.id)
                 }
                 return true
             case kVK_ANSI_O:
-                if modifiers.contains(.shift), clipboardManager.selectedCategory != .snippets {
-                    extractTextFromSelection()
-                } else if clipboardManager.selectedCategory != .snippets {
+                if clipboardManager.selectedCategory != .snippets {
                     openSelected()
                 }
                 return true
@@ -956,47 +1034,57 @@ struct LauncherView: View {
             case kVK_ANSI_7:
                 clipboardManager.selectedCategory = .snippets
                 return true
-            case kVK_ANSI_Comma:
-                if !event.isARepeat {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                        showSettings.toggle()
-                    }
-                }
-                return true
-            case kVK_ANSI_V:
-                if modifiers.contains(.shift) {
-                    clipboardManager.capturePasteTargetApplication()
-                    clipboardManager.pasteNextStackItem()
-                    onClose()
-                    return true
-                }
             default:
                 break
             }
         }
 
-        switch Int(event.keyCode) {
+        if commandShift {
+            switch keyCode {
+            case kVK_ANSI_C:
+                if clipboardManager.selectedCategory != .snippets {
+                    copySelectedPath()
+                }
+                return true
+            case kVK_ANSI_O:
+                if clipboardManager.selectedCategory != .snippets {
+                    extractTextFromSelection()
+                }
+                return true
+            case kVK_ANSI_V:
+                clipboardManager.capturePasteTargetApplication()
+                clipboardManager.pasteNextStackItem()
+                onClose()
+                return true
+            default:
+                break
+            }
+        }
+
+        if modifiers == .shift, keyCode == kVK_Return {
+            if clipboardManager.selectedCategory == .snippets {
+                pasteSelectedTemplate()
+            } else {
+                pasteSelected(asPlainText: true)
+            }
+            return true
+        }
+
+        guard modifiers.isEmpty else { return false }
+
+        switch keyCode {
         case kVK_Escape:
             guard !event.isARepeat else { return true }
-            if showSettings {
-                withAnimation(.spring(response: 0.24, dampingFraction: 0.88)) {
-                    showSettings = false
-                }
-            } else {
-                onClose()
-            }
+            onClose()
             return true
         case kVK_Return:
             if clipboardManager.selectedCategory == .snippets {
                 pasteSelectedTemplate()
-            } else if modifiers.contains(.shift) {
-                pasteSelected(asPlainText: true)
             } else {
                 pasteSelected()
             }
             return true
         case kVK_Space:
-            if isSearchFocused { return false }
             if clipboardManager.selectedCategory == .snippets {
                 return true
             }
@@ -1005,11 +1093,9 @@ struct LauncherView: View {
             }
             return true
         case kVK_LeftArrow:
-            if isSearchFocused { return false }
             moveSelection(step: -1)
             return true
         case kVK_RightArrow:
-            if isSearchFocused { return false }
             moveSelection(step: 1)
             return true
         case kVK_UpArrow:
@@ -1025,11 +1111,13 @@ struct LauncherView: View {
             moveSelection(step: downStep)
             return true
         case kVK_ANSI_T:
+            guard !event.isARepeat else { return true }
             if clipboardManager.selectedCategory != .snippets {
                 clipboardManager.displayMode = clipboardManager.displayMode == .list ? .tiles : .list
             }
             return true
         case kVK_ANSI_P:
+            guard !event.isARepeat else { return true }
             if clipboardManager.selectedCategory != .snippets {
                 clipboardManager.showPinnedOnly.toggle()
             }
@@ -1040,6 +1128,18 @@ struct LauncherView: View {
         default:
             return false
         }
+    }
+
+    private var isPresentingSheet: Bool {
+        editingItem != nil
+            || formattingItem != nil
+            || editingTemplate != nil
+            || showNewTemplateSheet
+    }
+
+    private var isTextInputActive: Bool {
+        guard let firstResponder = NSApp.keyWindow?.firstResponder else { return false }
+        return firstResponder is NSTextView || firstResponder is NSTextField
     }
 
     private func moveSelection(step: Int) {

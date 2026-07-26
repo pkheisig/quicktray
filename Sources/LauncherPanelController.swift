@@ -74,6 +74,10 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
             },
             onBeginDrag: { [weak self] in
                 self?.beginDragProtection()
+            },
+            shouldHandleKeyEvent: { [weak panel] event in
+                guard let panel else { return false }
+                return panel.isKeyWindow && event.window === panel
             }
         )
 
