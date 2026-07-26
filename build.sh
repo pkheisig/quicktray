@@ -22,8 +22,13 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-echo "Compiling for arm64..."
-swiftc $SOURCES -o "$APP_BUNDLE/Contents/MacOS/$APP_NAME" -target arm64-apple-macosx13.0 -sdk $(xcrun --show-sdk-path)
+echo "Compiling optimized arm64 build..."
+swiftc $SOURCES \
+    -o "$APP_BUNDLE/Contents/MacOS/$APP_NAME" \
+    -target arm64-apple-macosx13.0 \
+    -sdk $(xcrun --show-sdk-path) \
+    -O \
+    -whole-module-optimization
 
 echo "Copying Resources..."
 cp Info.plist "$APP_BUNDLE/Contents/Info.plist"

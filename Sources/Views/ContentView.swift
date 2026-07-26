@@ -74,10 +74,6 @@ struct LauncherView: View {
         visibleTemplates.first(where: { $0.id == selectedSnippetID })
     }
 
-    private var pinnedCount: Int {
-        clipboardManager.items.filter(\.isPinned).count
-    }
-
     private var historyLimitOptions: [Int] {
         if defaultHistoryLimitOptions.contains(clipboardManager.unpinnedRetentionLimit) {
             return defaultHistoryLimitOptions
@@ -267,14 +263,6 @@ struct LauncherView: View {
 
                 Spacer()
 
-                HStack(spacing: 12) {
-                    Text("\(clipboardManager.items.count) items")
-                    if pinnedCount > 0 {
-                        Text("\(pinnedCount) pinned")
-                    }
-                }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
             } else if selectedItemID != nil {
                 HStack(spacing: 6) {
                     Text("Return")
@@ -298,14 +286,6 @@ struct LauncherView: View {
 
                 Spacer()
 
-                HStack(spacing: 12) {
-                    Text("\(clipboardManager.items.count) items")
-                    if pinnedCount > 0 {
-                        Text("\(pinnedCount) pinned")
-                    }
-                }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
             } else {
                 Text("Type to search...")
                     .font(.system(size: 11, weight: .medium))
@@ -638,7 +618,6 @@ struct LauncherView: View {
                                     LauncherListCard(
                                         item: item,
                                         displayTitle: item.title,
-                                        displayDetail: item.detailText,
                                         previewImage: clipboardManager.previewImage(for: item),
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: selectedItemIDs.contains(item.id),
@@ -1512,7 +1491,6 @@ private struct LauncherCompactCard: View {
 private struct LauncherListCard: View {
     let item: ClipboardItem
     let displayTitle: String
-    let displayDetail: String
     let previewImage: NSImage?
     let sourceAppIcon: NSImage?
     let isSelected: Bool
@@ -1551,18 +1529,22 @@ private struct LauncherListCard: View {
                     .foregroundStyle(.white.opacity(0.4))
             }
 
-            VStack(alignment: .trailing, spacing: 4) {
-                Text(item.fileTypeToken.uppercased())
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.3))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+            if item.kind != .text {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(item.fileTypeToken.uppercased())
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.3))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
 
-                Text(displayDetail)
-                    .lineLimit(1)
-                    .font(.system(size: 11, weight: .regular))
-                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .white.opacity(0.5))
+                    if !item.detailText.isEmpty {
+                        Text(item.detailText)
+                            .lineLimit(1)
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(isSelected ? .white.opacity(0.7) : .white.opacity(0.5))
+                    }
+                }
             }
         }
         .padding(.horizontal, 16)

@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         launcherHotKeyHoldWorkItem?.cancel()
         launcherHotKeyHoldWorkItem = nil
+        clipboardManager.flushPendingSave()
     }
 
     private func configureStatusItem() {

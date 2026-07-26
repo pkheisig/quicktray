@@ -251,30 +251,7 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         let resolvedDetail: String
         switch kind {
         case .text:
-            let trimmed = textContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if trimmed.isEmpty {
-                resolvedDetail = "Empty text item"
-                break
-            }
-            let lines = trimmed
-                .split(whereSeparator: \.isNewline)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-
-            if lines.count > 1 {
-                let remainder = lines
-                    .dropFirst()
-                    .joined(separator: " ")
-                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !remainder.isEmpty {
-                    resolvedDetail = String(remainder.prefix(220))
-                    break
-                }
-            }
-
-            let characterCount = trimmed.count
-            resolvedDetail = characterCount == 1 ? "1 character" : "\(characterCount) characters"
+            resolvedDetail = ""
         case .image:
             let size = imageDimensions ?? .zero
             let width = Int(size.width)
@@ -742,6 +719,10 @@ final class ClipboardManager: ObservableObject {
     private static let retentionLimitKey = "unpinnedRetentionLimit"
     private static let monitoringEnabledKey = "clipboardMonitoringEnabled"
     private static let preferredPasteModeKey = "preferredPasteMode"
+    private static let selectedCategoryKey = "selectedCategory"
+    private static let fileTypeFilterKey = "fileTypeFilter"
+    private static let showPinnedOnlyKey = "showPinnedOnly"
+    private static let displayModeKey = "displayMode"
     private static let defaultUnpinnedRetentionLimit = 30
     private static let minUnpinnedRetentionLimit = 1
     private static let maxUnpinnedRetentionLimit = 500
@@ -770,8 +751,9 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    @Published var selectedCategory: ClipboardCategory = .mixed {
+    @Published var selectedCategory: ClipboardCategory {
         didSet {
+            UserDefaults.standard.set(selectedCategory.rawValue, forKey: Self.selectedCategoryKey)
             if !availableFileTypeFilters.contains(fileTypeFilter) {
                 fileTypeFilter = "all"
             }
@@ -779,14 +761,16 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    @Published var fileTypeFilter = "all" {
+    @Published var fileTypeFilter: String {
         didSet {
+            UserDefaults.standard.set(fileTypeFilter, forKey: Self.fileTypeFilterKey)
             scheduleDisplayedItemsRefresh()
         }
     }
 
-    @Published var showPinnedOnly = false {
+    @Published var showPinnedOnly: Bool {
         didSet {
+            UserDefaults.standard.set(showPinnedOnly, forKey: Self.showPinnedOnlyKey)
             scheduleDisplayedItemsRefresh()
         }
     }
@@ -804,13 +788,18 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    @Published var displayMode: ClipboardDisplayMode = .list
+    @Published var displayMode: ClipboardDisplayMode {
+        didSet {
+            UserDefaults.standard.set(displayMode.rawValue, forKey: Self.displayModeKey)
+        }
+    }
     @Published private(set) var displayedItems: [ClipboardItem] = []
     @Published private(set) var displayRevision = 0
     @Published private(set) var previewImages: [UUID: NSImage] = [:]
 
     private let pasteboard = NSPasteboard.general
     private let previewQueue = DispatchQueue(label: "com.gemini.quicktray.previews", qos: .userInitiated)
+    private let persistenceQueue = DispatchQueue(label: "com.gemini.quicktray.persistence", qos: .utility)
     private var timer: Timer?
     private var lastChangeCount: Int
     private var historyRevision = 0
@@ -867,12 +856,23 @@ final class ClipboardManager: ObservableObject {
         let savedLimit = UserDefaults.standard.integer(forKey: Self.retentionLimitKey)
         let initialLimit = savedLimit > 0 ? savedLimit : Self.defaultUnpinnedRetentionLimit
         unpinnedRetentionLimit = Self.clampedRetentionLimit(initialLimit)
+        selectedCategory = ClipboardCategory(
+            rawValue: UserDefaults.standard.string(forKey: Self.selectedCategoryKey) ?? ""
+        ) ?? .mixed
+        fileTypeFilter = UserDefaults.standard.string(forKey: Self.fileTypeFilterKey) ?? "all"
+        showPinnedOnly = UserDefaults.standard.object(forKey: Self.showPinnedOnlyKey) as? Bool ?? false
         isMonitoringEnabled = UserDefaults.standard.object(forKey: Self.monitoringEnabledKey) as? Bool ?? true
         preferredPasteMode = ClipboardPasteMode(rawValue: UserDefaults.standard.string(forKey: Self.preferredPasteModeKey) ?? "") ?? .rich
+        displayMode = ClipboardDisplayMode(
+            rawValue: UserDefaults.standard.string(forKey: Self.displayModeKey) ?? ""
+        ) ?? .list
         lastChangeCount = pasteboard.changeCount
 
         loadItems()
         trimUnpinnedItemsToLimit()
+        if !availableFileTypeFilters.contains(fileTypeFilter) {
+            fileTypeFilter = "all"
+        }
         loadInitialPreviews()
         refreshDisplayedItemsNow()
         installTypelessPasteEventMonitor()
@@ -904,14 +904,32 @@ final class ClipboardManager: ObservableObject {
             guard generation == self.saveItemsGeneration else { return }
             do {
                 let data = try JSONEncoder().encode(snapshot)
-                try data.write(to: persistenceURL)
+                try data.write(to: persistenceURL, options: .atomic)
             } catch {
                 print("Failed to save clipboard history: \(error)")
             }
         }
 
         saveItemsWorkItem = workItem
-        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 0.2, execute: workItem)
+        persistenceQueue.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+    }
+
+    func flushPendingSave() {
+        guard let persistenceURL else { return }
+
+        saveItemsWorkItem?.cancel()
+        saveItemsWorkItem = nil
+        let snapshot = items.map { $0.snapshot(omitImageData: true) }
+        saveItemsGeneration += 1
+
+        persistenceQueue.sync {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: persistenceURL, options: .atomic)
+            } catch {
+                print("Failed to save clipboard history: \(error)")
+            }
+        }
     }
 
     func preferredSelectionID(in visibleItems: [ClipboardItem]) -> UUID? {
@@ -981,7 +999,7 @@ final class ClipboardManager: ObservableObject {
     }
 
     var availableFileTypeFilters: [String] {
-        let filteredItems = sortedItems().filter { item in
+        let filteredItems = items.filter { item in
             selectedCategory == .mixed
                 || selectedCategory == .snippets
                 || item.primaryCategory == selectedCategory
@@ -1454,19 +1472,29 @@ final class ClipboardManager: ObservableObject {
         let searchableTokens = item.searchableTokens
         guard !searchableTokens.isEmpty else { return 0 }
 
-        var tokenScores: [Double] = []
-        tokenScores.reserveCapacity(queryTokens.count)
+        var totalScore = 0.0
+        var strongMatchCount = 0
 
         for queryToken in queryTokens {
-            let bestTokenScore = searchableTokens.reduce(0.0) { partial, candidate in
-                max(partial, fuzzyTokenScore(query: queryToken, candidate: candidate))
+            var bestTokenScore = 0.0
+            for candidate in searchableTokens {
+                bestTokenScore = max(
+                    bestTokenScore,
+                    fuzzyTokenScore(query: queryToken, candidate: candidate)
+                )
+                if bestTokenScore >= 1.5 {
+                    break
+                }
             }
             guard bestTokenScore > 0.32 else { return 0 }
-            tokenScores.append(bestTokenScore)
+            totalScore += bestTokenScore
+            if bestTokenScore > 0.55 {
+                strongMatchCount += 1
+            }
         }
 
-        let avgTokenScore = tokenScores.reduce(0, +) / Double(tokenScores.count)
-        let coverage = Double(tokenScores.filter { $0 > 0.55 }.count) / Double(tokenScores.count)
+        let avgTokenScore = totalScore / Double(queryTokens.count)
+        let coverage = Double(strongMatchCount) / Double(queryTokens.count)
 
         let titleTokens = item.titleTokens
         let sourceTokens = item.sourceTokens
@@ -1488,10 +1516,11 @@ final class ClipboardManager: ObservableObject {
         }
 
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filteredItems = sortedItems()
-            .filter(itemMatchesCurrentCategory(_:))
-            .filter(itemMatchesCurrentTypeFilter(_:))
-            .filter(itemMatchesPinnedFilter(_:))
+        let filteredItems = sortedItems().filter { item in
+            itemMatchesCurrentCategory(item)
+                && itemMatchesCurrentTypeFilter(item)
+                && itemMatchesPinnedFilter(item)
+        }
 
         guard !query.isEmpty else {
             displayedItems = filteredItems
@@ -1894,7 +1923,6 @@ final class ClipboardManager: ObservableObject {
             suppressItemSideEffects = false
             historyRevision += 1
             enforceImageMemoryBudget()
-            refreshDisplayedItemsNow()
             scheduleSaveItems()
         } catch {
             suppressItemSideEffects = false
