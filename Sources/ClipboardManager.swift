@@ -111,6 +111,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
     var capturedTypeIdentifiers: [String]
     var sourceApplicationName: String?
     var sourceBundleIdentifier: String?
+    var fileGroupID: UUID?
+    var fileGroupIndex: Int?
     var timestamp: Date
     var isPinned: Bool
     var payloadFingerprint: String
@@ -356,6 +358,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         case capturedTypeIdentifiers
         case sourceApplicationName
         case sourceBundleIdentifier
+        case fileGroupID
+        case fileGroupIndex
         case timestamp
         case isPinned
         case payloadFingerprint
@@ -382,6 +386,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         self.capturedTypeIdentifiers = capturedTypeIdentifiers
         self.sourceApplicationName = sourceApplicationName
         self.sourceBundleIdentifier = sourceBundleIdentifier
+        fileGroupID = nil
+        fileGroupIndex = nil
         timestamp = Date()
         isPinned = false
         payloadFingerprint = Self.fingerprint(forText: text)
@@ -401,6 +407,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         capturedTypeIdentifiers = item.capturedTypeIdentifiers
         sourceApplicationName = item.sourceApplicationName
         sourceBundleIdentifier = item.sourceBundleIdentifier
+        fileGroupID = item.fileGroupID
+        fileGroupIndex = item.fileGroupIndex
         timestamp = item.timestamp
         isPinned = item.isPinned
         payloadFingerprint = item.payloadFingerprint
@@ -426,6 +434,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         capturedTypeIdentifiers = try container.decodeIfPresent([String].self, forKey: .capturedTypeIdentifiers) ?? []
         sourceApplicationName = try container.decodeIfPresent(String.self, forKey: .sourceApplicationName)
         sourceBundleIdentifier = try container.decodeIfPresent(String.self, forKey: .sourceBundleIdentifier)
+        fileGroupID = try container.decodeIfPresent(UUID.self, forKey: .fileGroupID)
+        fileGroupIndex = try container.decodeIfPresent(Int.self, forKey: .fileGroupIndex)
         timestamp = try container.decode(Date.self, forKey: .timestamp)
         isPinned = try container.decode(Bool.self, forKey: .isPinned)
         payloadFingerprint = try container.decodeIfPresent(String.self, forKey: .payloadFingerprint) ?? Self.fallbackFingerprint(
@@ -457,6 +467,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         try container.encode(capturedTypeIdentifiers, forKey: .capturedTypeIdentifiers)
         try container.encodeIfPresent(sourceApplicationName, forKey: .sourceApplicationName)
         try container.encodeIfPresent(sourceBundleIdentifier, forKey: .sourceBundleIdentifier)
+        try container.encodeIfPresent(fileGroupID, forKey: .fileGroupID)
+        try container.encodeIfPresent(fileGroupIndex, forKey: .fileGroupIndex)
         try container.encode(timestamp, forKey: .timestamp)
         try container.encode(isPinned, forKey: .isPinned)
         try container.encode(payloadFingerprint, forKey: .payloadFingerprint)
@@ -482,6 +494,8 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         self.capturedTypeIdentifiers = capturedTypeIdentifiers
         self.sourceApplicationName = sourceApplicationName
         self.sourceBundleIdentifier = sourceBundleIdentifier
+        fileGroupID = nil
+        fileGroupIndex = nil
         timestamp = Date()
         isPinned = false
         cachedImage = nil
@@ -490,6 +504,9 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
 
     init(
         fileURL: URL,
+        fileGroupID: UUID? = nil,
+        fileGroupIndex: Int? = nil,
+        timestamp: Date = Date(),
         capturedTypeIdentifiers: [String] = [],
         sourceApplicationName: String? = nil,
         sourceBundleIdentifier: String? = nil
@@ -507,7 +524,9 @@ final class ClipboardItem: Identifiable, Hashable, Codable {
         self.capturedTypeIdentifiers = capturedTypeIdentifiers
         self.sourceApplicationName = sourceApplicationName
         self.sourceBundleIdentifier = sourceBundleIdentifier
-        timestamp = Date()
+        self.fileGroupID = fileGroupID
+        self.fileGroupIndex = fileGroupIndex
+        self.timestamp = timestamp
         isPinned = false
         payloadFingerprint = Self.fingerprint(forFileURL: fileURL)
     }
@@ -1042,16 +1061,20 @@ final class ClipboardManager: ObservableObject {
         let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL],
            !fileURLs.isEmpty {
-            for fileURL in fileURLs.reversed() {
-                addItem(
-                    ClipboardItem(
-                        fileURL: fileURL,
-                        capturedTypeIdentifiers: capturedTypes,
-                        sourceApplicationName: sourceName,
-                        sourceBundleIdentifier: sourceBundleIdentifier
-                    )
+            let captureDate = Date()
+            let groupID = fileURLs.count > 1 ? UUID() : nil
+            let capturedItems = fileURLs.enumerated().map { index, fileURL in
+                ClipboardItem(
+                    fileURL: fileURL,
+                    fileGroupID: groupID,
+                    fileGroupIndex: groupID == nil ? nil : index,
+                    timestamp: captureDate.addingTimeInterval(-Double(index) * 0.000_001),
+                    capturedTypeIdentifiers: capturedTypes,
+                    sourceApplicationName: sourceName,
+                    sourceBundleIdentifier: sourceBundleIdentifier
                 )
             }
+            addItems(capturedItems, refreshTimestamps: true)
             return
         }
 
@@ -1093,6 +1116,18 @@ final class ClipboardManager: ObservableObject {
         items = items
     }
 
+    func setPinned(_ isPinned: Bool, for itemIDs: Set<UUID>) {
+        guard !itemIDs.isEmpty else { return }
+        var changed = false
+        for item in items where itemIDs.contains(item.id) && item.isPinned != isPinned {
+            item.isPinned = isPinned
+            changed = true
+        }
+        if changed {
+            items = items
+        }
+    }
+
     private func shouldIgnoreClipboardChange(sourceName: String?, sourceBundleIdentifier: String?) -> Bool {
         guard AppSettings.shared.ignoreTypelessTranscriptions else { return false }
 
@@ -1129,14 +1164,46 @@ final class ClipboardManager: ObservableObject {
     }
 
     func removeItem(id: UUID) {
-        if let item = items.first(where: { $0.id == id }) {
+        removeItems(ids: [id])
+    }
+
+    func removeItems(ids itemIDs: Set<UUID>) {
+        guard !itemIDs.isEmpty else { return }
+        for item in items where itemIDs.contains(item.id) {
             removeImagePayload(for: item)
         }
-        items.removeAll { $0.id == id }
-        stackQueue.removeAll { $0 == id }
+        items.removeAll { itemIDs.contains($0.id) }
+        stackQueue.removeAll { itemIDs.contains($0) }
         stackCursor = min(stackCursor, max(stackQueue.count - 1, 0))
-        previewImages[id] = nil
-        previewLoadsInFlight.remove(id)
+        for itemID in itemIDs {
+            previewImages[itemID] = nil
+            previewLoadsInFlight.remove(itemID)
+        }
+    }
+
+    func copyFileGroupToClipboard(_ groupItems: [ClipboardItem], shouldPaste: Bool) {
+        let orderedItems = groupItems
+            .filter { $0.kind == .file }
+            .sorted { ($0.fileGroupIndex ?? 0) < ($1.fileGroupIndex ?? 0) }
+        let fileURLs = orderedItems.compactMap(\.fileURL)
+        guard fileURLs.count > 1 else {
+            if let item = orderedItems.first {
+                copyToClipboard(item: item, shouldPaste: shouldPaste, refreshHistoryEntry: false)
+            }
+            return
+        }
+
+        let signature = "file-group:" + orderedItems.map(\.payloadFingerprint).joined(separator: "|")
+        if !pasteboardAlreadyContains(signature: signature) {
+            pasteboard.clearContents()
+            guard pasteboard.writeObjects(fileURLs.map { $0 as NSURL }) else { return }
+            lastChangeCount = pasteboard.changeCount
+            lastWrittenPasteboardSignature = signature
+        }
+
+        if shouldPaste {
+            schedulePasteShortcut()
+        }
     }
 
     func copyToClipboard(
@@ -1405,7 +1472,11 @@ final class ClipboardManager: ObservableObject {
         if let existingIndex = items.firstIndex(where: { $0.matchesSamePayload(as: item) }) {
             let existingItem = items[existingIndex]
             if refreshTimestamp {
-                existingItem.timestamp = Date()
+                existingItem.timestamp = item.timestamp
+                if item.kind == .file {
+                    existingItem.fileGroupID = item.fileGroupID
+                    existingItem.fileGroupIndex = item.fileGroupIndex
+                }
             }
             if existingItem.sourceApplicationName == nil {
                 existingItem.sourceApplicationName = item.sourceApplicationName
@@ -1440,6 +1511,27 @@ final class ClipboardManager: ObservableObject {
         enforceImageMemoryBudget()
         loadPreview(for: item)
         return item
+    }
+
+    private func addItems(_ capturedItems: [ClipboardItem], refreshTimestamps: Bool) {
+        guard capturedItems.count > 1 else {
+            if let item = capturedItems.first {
+                addItem(item, refreshTimestamp: refreshTimestamps)
+            }
+            return
+        }
+
+        let sideEffectsWereSuppressed = suppressItemSideEffects
+        suppressItemSideEffects = true
+        for item in capturedItems {
+            addItem(item, refreshTimestamp: refreshTimestamps)
+        }
+        suppressItemSideEffects = sideEffectsWereSuppressed
+
+        guard !sideEffectsWereSuppressed else { return }
+        historyRevision += 1
+        scheduleSaveItems()
+        scheduleDisplayedItemsRefresh()
     }
 
     private func sortedItems() -> [ClipboardItem] {

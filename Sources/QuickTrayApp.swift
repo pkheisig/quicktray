@@ -3,7 +3,9 @@ import AppKit
 import Carbon.HIToolbox
 import Combine
 
+#if !QUICKTRAY_SWIFT_PACKAGE
 @main
+#endif
 struct QuickTrayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 

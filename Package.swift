@@ -13,7 +13,15 @@ let package = Package(
     targets: [
         .target(
             name: "QuickTray",
-            path: "Sources"
+            path: "Sources",
+            swiftSettings: [
+                .define("QUICKTRAY_SWIFT_PACKAGE")
+            ]
+        ),
+        .testTarget(
+            name: "QuickTrayTests",
+            dependencies: ["QuickTray"],
+            path: "Tests"
         )
     ]
 )

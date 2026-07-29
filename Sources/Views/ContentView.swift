@@ -3,6 +3,61 @@ import AppKit
 import Carbon.HIToolbox
 import QuickLook
 
+struct LauncherFileGroup: Identifiable {
+    let id: UUID
+    let items: [ClipboardItem]
+
+    var allPinned: Bool {
+        items.allSatisfy(\.isPinned)
+    }
+
+    var itemIDs: Set<UUID> {
+        Set(items.map(\.id))
+    }
+}
+
+enum LauncherListEntry: Identifiable {
+    case item(ClipboardItem)
+    case fileGroup(LauncherFileGroup)
+
+    var id: String {
+        switch self {
+        case .item(let item):
+            return "item-\(item.id.uuidString)"
+        case .fileGroup(let group):
+            return "file-group-\(group.id.uuidString)"
+        }
+    }
+
+    static func grouped(_ items: [ClipboardItem]) -> [LauncherListEntry] {
+        let groupMembers = Dictionary(grouping: items.compactMap { item -> (UUID, ClipboardItem)? in
+            guard item.kind == .file, let groupID = item.fileGroupID else { return nil }
+            return (groupID, item)
+        }, by: \.0).mapValues { pairs in
+            pairs.map(\.1).sorted { ($0.fileGroupIndex ?? 0) < ($1.fileGroupIndex ?? 0) }
+        }
+
+        var entries: [LauncherListEntry] = []
+        var emittedGroupIDs: Set<UUID> = []
+
+        for item in items {
+            guard item.kind == .file,
+                  let groupID = item.fileGroupID,
+                  let members = groupMembers[groupID],
+                  members.count > 1 else {
+                entries.append(.item(item))
+                continue
+            }
+
+            if emittedGroupIDs.insert(groupID).inserted {
+                entries.append(.fileGroup(LauncherFileGroup(id: groupID, items: members)))
+            }
+        }
+
+        return entries
+    }
+}
+
 struct LauncherView: View {
     @ObservedObject var clipboardManager: ClipboardManager
     @ObservedObject var settings: AppSettings
@@ -51,12 +106,26 @@ struct LauncherView: View {
         clipboardManager.displayedItems
     }
 
+    private var listEntries: [LauncherListEntry] {
+        LauncherListEntry.grouped(visibleItems)
+    }
+
     private var selectedItem: ClipboardItem? {
         visibleItems.first(where: { $0.id == selectedItemID })
     }
 
     private var selectedItems: [ClipboardItem] {
         visibleItems.filter { selectedItemIDs.contains($0.id) }
+    }
+
+    private var selectedFileGroup: LauncherFileGroup? {
+        let groupItems = selectedItems
+        guard groupItems.count > 1,
+              let groupID = groupItems.first?.fileGroupID,
+              groupItems.allSatisfy({ $0.kind == .file && $0.fileGroupID == groupID }) else {
+            return nil
+        }
+        return LauncherFileGroup(id: groupID, items: groupItems)
     }
 
     private var visibleTemplates: [SnippetTemplate] {
@@ -614,25 +683,12 @@ struct LauncherView: View {
                             .padding(.vertical, 8)
                         } else if clipboardManager.displayMode == .list {
                             LazyVStack(spacing: 0) {
-                                ForEach(visibleItems) { item in
-                                    LauncherListCard(
-                                        item: item,
-                                        displayTitle: item.title,
-                                        previewImage: clipboardManager.previewImage(for: item),
-                                        sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
-                                        isSelected: selectedItemIDs.contains(item.id),
-                                        onSelect: { handlePrimaryItemClick(item) },
-                                        onCopy: { onActivateItem(item, false) },
-                                        onPaste: { onActivateItem(item, true) },
-                                        onCopyPath: item.kind == .file ? { clipboardManager.copyPathToClipboard(item: item) } : nil,
-                                        onOpen: item.kind == .file ? { clipboardManager.openFile(item) } : nil,
-                                        onEdit: item.canEdit ? { editingItem = item } : nil,
-                                        onDelete: { clipboardManager.removeItem(id: item.id) },
-                                        onPin: { clipboardManager.togglePin(for: item.id) },
-                                        onStartDrag: startDraggingSelectedItem
-                                    )
-                                    .contextMenu {
-                                        itemContextMenu(for: item)
+                                ForEach(listEntries) { entry in
+                                    switch entry {
+                                    case .item(let item):
+                                        launcherListCard(for: item)
+                                    case .fileGroup(let group):
+                                        fileGroupSection(group)
                                     }
                                 }
                             }
@@ -678,6 +734,94 @@ struct LauncherView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func launcherListCard(for item: ClipboardItem, isGrouped: Bool = false) -> some View {
+        LauncherListCard(
+            item: item,
+            displayTitle: item.title,
+            previewImage: clipboardManager.previewImage(for: item),
+            sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
+            isSelected: selectedItemIDs.contains(item.id),
+            isGrouped: isGrouped,
+            onSelect: { handlePrimaryItemClick(item) },
+            onPaste: { onActivateItem(item, true) },
+            onStartDrag: startDraggingSelectedItem
+        )
+        .id(item.id)
+        .contextMenu {
+            itemContextMenu(for: item)
+        }
+    }
+
+    private func fileGroupSection(_ group: LauncherFileGroup) -> some View {
+        VStack(spacing: 0) {
+            LauncherFileGroupHeader(
+                items: group.items,
+                sourceAppIcon: group.items.first.flatMap { clipboardManager.sourceAppIcon(for: $0) },
+                isSelected: group.itemIDs.isSubset(of: selectedItemIDs),
+                onSelect: { selectFileGroup(group) },
+                onPaste: { copyFileGroup(group, shouldPaste: true) }
+            )
+            .contextMenu {
+                fileGroupContextMenu(for: group)
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.08))
+
+            ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
+                launcherListCard(for: item, isGrouped: true)
+                if index < group.items.count - 1 {
+                    Divider()
+                        .padding(.leading, 56)
+                        .background(Color.white.opacity(0.05))
+                }
+            }
+        }
+        .background(Color.white.opacity(0.035))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
+        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+    }
+
+    private func selectFileGroup(_ group: LauncherFileGroup) {
+        selectedItemID = group.items.first?.id
+        selectedItemIDs = group.itemIDs
+        selectedSnippetID = nil
+    }
+
+    private func copyFileGroup(_ group: LauncherFileGroup, shouldPaste: Bool) {
+        if shouldPaste {
+            clipboardManager.capturePasteTargetApplication()
+        }
+        onClose()
+        clipboardManager.copyFileGroupToClipboard(group.items, shouldPaste: shouldPaste)
+    }
+
+    @ViewBuilder
+    private func fileGroupContextMenu(for group: LauncherFileGroup) -> some View {
+        Button("Copy \(group.items.count) Files") {
+            copyFileGroup(group, shouldPaste: false)
+        }
+
+        Button("Paste \(group.items.count) Files") {
+            copyFileGroup(group, shouldPaste: true)
+        }
+
+        Divider()
+
+        Button(group.allPinned ? "Unpin All" : "Pin All") {
+            clipboardManager.setPinned(!group.allPinned, for: group.itemIDs)
+        }
+
+        Button("Delete Group", role: .destructive) {
+            clipboardManager.removeItems(ids: group.itemIDs)
+        }
     }
 
     private func emptyState(text: String) -> some View {
@@ -789,11 +933,19 @@ struct LauncherView: View {
     }
 
     private func copySelected() {
+        if let selectedFileGroup {
+            copyFileGroup(selectedFileGroup, shouldPaste: false)
+            return
+        }
         guard let selectedItem else { return }
         onActivateItem(selectedItem, false)
     }
 
     private func pasteSelected(asPlainText: Bool = false) {
+        if !asPlainText, let selectedFileGroup {
+            copyFileGroup(selectedFileGroup, shouldPaste: true)
+            return
+        }
         guard let selectedItem else { return }
         if asPlainText {
             clipboardManager.capturePasteTargetApplication()
@@ -1248,9 +1400,7 @@ struct LauncherView: View {
     }
 
     private func deleteItems(_ items: [ClipboardItem]) {
-        for item in items {
-            clipboardManager.removeItem(id: item.id)
-        }
+        clipboardManager.removeItems(ids: Set(items.map(\.id)))
     }
 
 }
@@ -1494,14 +1644,9 @@ private struct LauncherListCard: View {
     let previewImage: NSImage?
     let sourceAppIcon: NSImage?
     let isSelected: Bool
+    let isGrouped: Bool
     let onSelect: () -> Void
-    let onCopy: () -> Void
     let onPaste: () -> Void
-    let onCopyPath: (() -> Void)?
-    let onOpen: (() -> Void)?
-    let onEdit: (() -> Void)?
-    let onDelete: () -> Void
-    let onPin: () -> Void
     let onStartDrag: () -> Void
 
     var body: some View {
@@ -1515,10 +1660,12 @@ private struct LauncherListCard: View {
                     .foregroundStyle(isSelected ? .white : .white.opacity(0.9))
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                SourceApplicationBadge(
-                    sourceName: item.sourceApplicationName,
-                    sourceIcon: sourceAppIcon
-                )
+                if !isGrouped {
+                    SourceApplicationBadge(
+                        sourceName: item.sourceApplicationName,
+                        sourceIcon: sourceAppIcon
+                    )
+                }
             }
 
             Spacer()
@@ -1538,7 +1685,7 @@ private struct LauncherListCard: View {
                         .padding(.vertical, 2)
                         .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
 
-                    if !item.detailText.isEmpty {
+                    if !isGrouped, !item.detailText.isEmpty {
                         Text(item.detailText)
                             .lineLimit(1)
                             .font(.system(size: 11, weight: .regular))
@@ -1547,8 +1694,8 @@ private struct LauncherListCard: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.horizontal, isGrouped ? 12 : 16)
+        .padding(.vertical, isGrouped ? 7 : 8)
         .background(rowBackgroundColor)
         .contentShape(Rectangle())
         .simultaneousGesture(
@@ -1573,6 +1720,72 @@ private struct LauncherListCard: View {
             return Color.orange.opacity(isSelected ? 0.20 : 0.10)
         }
         return isSelected ? Color.white.opacity(0.1) : Color.clear
+    }
+}
+
+private struct LauncherFileGroupHeader: View {
+    let items: [ClipboardItem]
+    let sourceAppIcon: NSImage?
+    let isSelected: Bool
+    let onSelect: () -> Void
+    let onPaste: () -> Void
+
+    private var summary: String {
+        let visibleNames = items.prefix(3).map(\.title)
+        let remainingCount = items.count - visibleNames.count
+        if remainingCount > 0 {
+            return visibleNames.joined(separator: " • ") + " • +\(remainingCount)"
+        }
+        return visibleNames.joined(separator: " • ")
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.white.opacity(0.10))
+                    .frame(width: 36, height: 36)
+                Image(systemName: "square.stack.3d.up.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(items.count) files")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+
+                Text(summary)
+                    .lineLimit(1)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.48))
+            }
+
+            Spacer()
+
+            SourceApplicationBadge(
+                sourceName: items.first?.sourceApplicationName,
+                sourceIcon: sourceAppIcon
+            )
+
+            if items.allSatisfy(\.isPinned) {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange.opacity(0.75))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.white.opacity(0.09) : Color.clear)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            TapGesture()
+                .onEnded(onSelect)
+        )
+        .simultaneousGesture(
+            TapGesture(count: 2)
+                .onEnded(onPaste)
+        )
     }
 }
 
