@@ -10,7 +10,7 @@ private final class FloatingLauncherPanel: NSPanel {
 final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private static let dragProtectionTimeout: TimeInterval = 0.75
     private static let defaultSize = NSSize(width: 810, height: 560)
-    private static let minimumSize = NSSize(width: 740, height: 520)
+    private static let minimumSize = NSSize(width: 600, height: 420)
 
     private let clipboardManager: ClipboardManager
     private let settings: AppSettings
@@ -44,6 +44,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.minSize = Self.minimumSize
+        panel.contentMinSize = Self.minimumSize
 
         if let savedSize = settings.launcherWindowSize() {
             let restoredSize = NSSize(
@@ -82,6 +83,9 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         )
 
         let hostingController = NSHostingController(rootView: rootView)
+        // Keep SwiftUI's ideal size from turning into an AppKit window constraint.
+        // The panel's own minSize is the only bound on edge and corner resizing.
+        hostingController.sizingOptions = []
         hostingController.view.wantsLayer = true
         hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentViewController = hostingController

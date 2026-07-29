@@ -70,6 +70,7 @@ struct LauncherView: View {
     @State private var selectedItemID: UUID?
     @State private var selectedItemIDs: Set<UUID> = []
     @State private var selectedSnippetID: UUID?
+    @State private var expandedFileGroupIDs: Set<UUID> = []
     @State private var itemIDToReveal: UUID?
     @State private var snippetIDToReveal: UUID?
     @State private var editingItem: ClipboardItem?
@@ -197,9 +198,11 @@ struct LauncherView: View {
                 }
             }
         }
-        .frame(minWidth: 680, maxWidth: .infinity, minHeight: 460, maxHeight: .infinity)
+        .frame(minWidth: 592, maxWidth: .infinity, minHeight: 412, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .padding(30)
+        // Keep the visible edge inside AppKit's resize hit area. A large
+        // transparent inset makes the surface edge drag the window instead.
+        .padding(4)
         .quickLookPreview($quickLookURL)
         .sheet(item: $editingItem) { item in
             TextEditSheet(
@@ -755,30 +758,35 @@ struct LauncherView: View {
     }
 
     private func fileGroupSection(_ group: LauncherFileGroup) -> some View {
-        VStack(spacing: 0) {
+        let isExpanded = expandedFileGroupIDs.contains(group.id)
+
+        return VStack(spacing: 0) {
             LauncherFileGroupHeader(
                 items: group.items,
                 sourceAppIcon: group.items.first.flatMap { clipboardManager.sourceAppIcon(for: $0) },
                 isSelected: group.itemIDs.isSubset(of: selectedItemIDs),
-                onSelect: { selectFileGroup(group) },
-                onPaste: { copyFileGroup(group, shouldPaste: true) }
+                isExpanded: isExpanded,
+                onToggle: { toggleFileGroup(group) }
             )
             .contextMenu {
                 fileGroupContextMenu(for: group)
             }
 
-            Divider()
-                .background(Color.white.opacity(0.08))
+            if isExpanded {
+                Divider()
+                    .background(Color.white.opacity(0.08))
 
-            ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
-                launcherListCard(for: item, isGrouped: true)
-                if index < group.items.count - 1 {
-                    Divider()
-                        .padding(.leading, 56)
-                        .background(Color.white.opacity(0.05))
+                ForEach(Array(group.items.enumerated()), id: \.element.id) { index, item in
+                    launcherListCard(for: item, isGrouped: true)
+                    if index < group.items.count - 1 {
+                        Divider()
+                            .padding(.leading, 56)
+                            .background(Color.white.opacity(0.05))
+                    }
                 }
             }
         }
+        .animation(.easeInOut(duration: 0.16), value: isExpanded)
         .background(Color.white.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
@@ -793,6 +801,15 @@ struct LauncherView: View {
         selectedItemID = group.items.first?.id
         selectedItemIDs = group.itemIDs
         selectedSnippetID = nil
+    }
+
+    private func toggleFileGroup(_ group: LauncherFileGroup) {
+        selectFileGroup(group)
+        if expandedFileGroupIDs.contains(group.id) {
+            expandedFileGroupIDs.remove(group.id)
+        } else {
+            expandedFileGroupIDs.insert(group.id)
+        }
     }
 
     private func copyFileGroup(_ group: LauncherFileGroup, shouldPaste: Bool) {
@@ -1727,8 +1744,8 @@ private struct LauncherFileGroupHeader: View {
     let items: [ClipboardItem]
     let sourceAppIcon: NSImage?
     let isSelected: Bool
-    let onSelect: () -> Void
-    let onPaste: () -> Void
+    let isExpanded: Bool
+    let onToggle: () -> Void
 
     private var summary: String {
         let visibleNames = items.prefix(3).map(\.title)
@@ -1741,6 +1758,12 @@ private struct LauncherFileGroupHeader: View {
 
     var body: some View {
         HStack(spacing: 12) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white.opacity(0.55))
+                .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                .frame(width: 10)
+
             ZStack {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(Color.white.opacity(0.10))
@@ -1780,11 +1803,7 @@ private struct LauncherFileGroupHeader: View {
         .contentShape(Rectangle())
         .simultaneousGesture(
             TapGesture()
-                .onEnded(onSelect)
-        )
-        .simultaneousGesture(
-            TapGesture(count: 2)
-                .onEnded(onPaste)
+                .onEnded(onToggle)
         )
     }
 }
