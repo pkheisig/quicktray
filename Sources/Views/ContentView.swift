@@ -705,7 +705,6 @@ struct LauncherView: View {
                                         item: item,
                                         previewText: item.textContent,
                                         previewImage: clipboardManager.previewImage(for: item),
-                                        sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: selectedItemIDs.contains(item.id),
                                         onSelect: { handlePrimaryItemClick(item) },
                                         onPaste: { onActivateItem(item, true) },
@@ -738,7 +737,6 @@ struct LauncherView: View {
         LauncherListCard(
             item: item,
             displayTitle: item.title,
-            sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
             isSelected: selectedItemIDs.contains(item.id),
             isGrouped: isGrouped,
             onSelect: { handlePrimaryItemClick(item) },
@@ -757,7 +755,6 @@ struct LauncherView: View {
         return VStack(spacing: 0) {
             LauncherFileGroupHeader(
                 items: group.items,
-                sourceAppIcon: group.items.first.flatMap { clipboardManager.sourceAppIcon(for: $0) },
                 isSelected: group.itemIDs.isSubset(of: selectedItemIDs),
                 isExpanded: isExpanded,
                 onToggle: { toggleFileGroup(group) }
@@ -1563,44 +1560,9 @@ private struct UtilityBadge: View {
     }
 }
 
-private struct SourceApplicationBadge: View {
-    let sourceName: String?
-    let sourceIcon: NSImage?
-
-    private var displayName: String {
-        let trimmedName = sourceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmedName.isEmpty ? "Unknown app" : trimmedName
-    }
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if let sourceIcon {
-                Image(nsImage: sourceIcon)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 12, height: 12)
-                    .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
-            } else {
-                Image(systemName: "app")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.white.opacity(0.45))
-            }
-
-            Text(displayName)
-                .lineLimit(1)
-                .font(.system(size: 10, weight: .regular))
-                .foregroundStyle(.white.opacity(0.52))
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 2)
-        .background(.white.opacity(0.06), in: Capsule())
-    }
-}
-
 private struct LauncherListCard: View {
     let item: ClipboardItem
     let displayTitle: String
-    let sourceAppIcon: NSImage?
     let isSelected: Bool
     let isGrouped: Bool
     let onSelect: () -> Void
@@ -1620,11 +1582,6 @@ private struct LauncherListCard: View {
                 .foregroundStyle(isSelected ? .white : .white.opacity(0.82))
 
             Spacer()
-
-            SourceApplicationBadge(
-                sourceName: item.sourceApplicationName,
-                sourceIcon: sourceAppIcon
-            )
 
             if item.isPinned {
                 Image(systemName: "pin.fill")
@@ -1664,7 +1621,6 @@ private struct LauncherListCard: View {
 
 private struct LauncherFileGroupHeader: View {
     let items: [ClipboardItem]
-    let sourceAppIcon: NSImage?
     let isSelected: Bool
     let isExpanded: Bool
     let onToggle: () -> Void
@@ -1708,11 +1664,6 @@ private struct LauncherFileGroupHeader: View {
 
             Spacer()
 
-            SourceApplicationBadge(
-                sourceName: items.first?.sourceApplicationName,
-                sourceIcon: sourceAppIcon
-            )
-
             if items.allSatisfy(\.isPinned) {
                 Image(systemName: "pin.fill")
                     .font(.system(size: 10))
@@ -1734,37 +1685,23 @@ private struct LauncherTileCard: View {
     let item: ClipboardItem
     let previewText: String?
     let previewImage: NSImage?
-    let sourceAppIcon: NSImage?
     let isSelected: Bool
     let onSelect: () -> Void
     let onPaste: () -> Void
     let onStartDrag: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .topTrailing) {
-                PreviewCanvas(item: item, previewImage: previewImage, previewText: previewText)
+        ZStack(alignment: .topTrailing) {
+            PreviewCanvas(item: item, previewImage: previewImage, previewText: previewText)
 
-                if item.isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white)
-                        .padding(6)
-                        .background(Color.black.opacity(0.4), in: Circle())
-                        .padding(8)
-                }
+            if item.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white)
+                    .padding(6)
+                    .background(Color.black.opacity(0.4), in: Circle())
+                    .padding(8)
             }
-
-            HStack {
-                SourceApplicationBadge(
-                    sourceName: item.sourceApplicationName,
-                    sourceIcon: sourceAppIcon
-                )
-
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 34)
         }
         .frame(maxWidth: .infinity, alignment: .top)
         .background(tileBackgroundColor)
