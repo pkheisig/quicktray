@@ -370,13 +370,27 @@ struct LauncherView: View {
                     showSettings.toggle()
                 }
             } label: {
-                Image(systemName: "command")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .padding(6)
-                    .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                HStack(spacing: 5) {
+                    Text("Settings:")
+                        .font(.system(size: 10, weight: .regular))
+
+                    ShortcutKeycap {
+                        Image(systemName: "command")
+                            .font(.system(size: 9, weight: .medium))
+                    }
+
+                    Text("+")
+                        .font(.system(size: 9, weight: .regular))
+
+                    ShortcutKeycap {
+                        Text(",")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                }
+                .foregroundStyle(.white.opacity(0.58))
             }
             .buttonStyle(.plain)
+            .help("Open settings (Command + comma)")
         }
         .padding(.horizontal, 16)
         .frame(height: 38)
@@ -666,25 +680,7 @@ struct LauncherView: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        if clipboardManager.displayMode == .compact {
-                            LazyVStack(spacing: 0) {
-                                ForEach(visibleItems) { item in
-                                    LauncherCompactCard(
-                                        item: item,
-                                        displayTitle: item.title,
-                                        sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
-                                        isSelected: selectedItemIDs.contains(item.id),
-                                        onSelect: { handlePrimaryItemClick(item) },
-                                        onPaste: { onActivateItem(item, true) },
-                                        onStartDrag: startDraggingSelectedItem
-                                    )
-                                    .contextMenu {
-                                        itemContextMenu(for: item)
-                                    }
-                                }
-                            }
-                            .padding(.vertical, 8)
-                        } else if clipboardManager.displayMode == .list {
+                        if clipboardManager.displayMode == .list {
                             LazyVStack(spacing: 0) {
                                 ForEach(listEntries) { entry in
                                     switch entry {
@@ -697,23 +693,22 @@ struct LauncherView: View {
                             }
                             .padding(.vertical, 8)
                         } else {
-                            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: tileColumns), spacing: 12) {
+                            LazyVGrid(
+                                columns: Array(
+                                    repeating: GridItem(.flexible(), spacing: 12, alignment: .top),
+                                    count: tileColumns
+                                ),
+                                spacing: 12
+                            ) {
                                 ForEach(visibleItems) { item in
                                     LauncherTileCard(
                                         item: item,
-                                        displayTitle: item.title,
                                         previewText: item.textContent,
                                         previewImage: clipboardManager.previewImage(for: item),
                                         sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
                                         isSelected: selectedItemIDs.contains(item.id),
                                         onSelect: { handlePrimaryItemClick(item) },
-                                        onCopy: { onActivateItem(item, false) },
                                         onPaste: { onActivateItem(item, true) },
-                                        onCopyPath: item.kind == .file ? { clipboardManager.copyPathToClipboard(item: item) } : nil,
-                                        onOpen: item.kind == .file ? { clipboardManager.openFile(item) } : nil,
-                                        onEdit: item.canEdit ? { editingItem = item } : nil,
-                                        onDelete: { clipboardManager.removeItem(id: item.id) },
-                                        onPin: { clipboardManager.togglePin(for: item.id) },
                                         onStartDrag: startDraggingSelectedItem
                                     )
                                     .contextMenu {
@@ -743,7 +738,6 @@ struct LauncherView: View {
         LauncherListCard(
             item: item,
             displayTitle: item.title,
-            previewImage: clipboardManager.previewImage(for: item),
             sourceAppIcon: clipboardManager.sourceAppIcon(for: item),
             isSelected: selectedItemIDs.contains(item.id),
             isGrouped: isGrouped,
@@ -1487,6 +1481,16 @@ private struct SearchField: View {
     }
 }
 
+private struct ShortcutKeycap<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .frame(width: 20, height: 20)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
 private struct ModeToggle: View {
     @Binding var selection: ClipboardDisplayMode
 
@@ -1563,40 +1567,42 @@ private struct SourceApplicationBadge: View {
     let sourceName: String?
     let sourceIcon: NSImage?
 
-    var body: some View {
-        if sourceName != nil || sourceIcon != nil {
-            HStack(spacing: 4) {
-                if let sourceIcon {
-                    Image(nsImage: sourceIcon)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 12, height: 12)
-                        .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
-                } else {
-                    Image(systemName: "app")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.45))
-                }
+    private var displayName: String {
+        let trimmedName = sourceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedName.isEmpty ? "Unknown app" : trimmedName
+    }
 
-                if let sourceName, !sourceName.isEmpty {
-                    Text(sourceName)
-                        .lineLimit(1)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.52))
-                }
+    var body: some View {
+        HStack(spacing: 4) {
+            if let sourceIcon {
+                Image(nsImage: sourceIcon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 12, height: 12)
+                    .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+            } else {
+                Image(systemName: "app")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white.opacity(0.45))
             }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 2)
-            .background(.white.opacity(0.06), in: Capsule())
+
+            Text(displayName)
+                .lineLimit(1)
+                .font(.system(size: 10, weight: .regular))
+                .foregroundStyle(.white.opacity(0.52))
         }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(.white.opacity(0.06), in: Capsule())
     }
 }
 
-private struct LauncherCompactCard: View {
+private struct LauncherListCard: View {
     let item: ClipboardItem
     let displayTitle: String
     let sourceAppIcon: NSImage?
     let isSelected: Bool
+    let isGrouped: Bool
     let onSelect: () -> Void
     let onPaste: () -> Void
     let onStartDrag: () -> Void
@@ -1610,8 +1616,8 @@ private struct LauncherCompactCard: View {
 
             Text(displayTitle)
                 .lineLimit(1)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(isSelected ? .white : .white.opacity(0.8))
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(isSelected ? .white : .white.opacity(0.82))
 
             Spacer()
 
@@ -1625,91 +1631,7 @@ private struct LauncherCompactCard: View {
                     .font(.system(size: 10))
                     .foregroundStyle(.white.opacity(0.4))
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(rowBackgroundColor)
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            TapGesture()
-                .onEnded(onSelect)
-        )
-        .simultaneousGesture(
-            TapGesture(count: 2)
-                .onEnded(onPaste)
-        )
-        .onDrag {
-            onStartDrag()
-            return item.dragItemProvider() ?? NSItemProvider()
-        } preview: {
-            Color.clear
-                .frame(width: 1, height: 1)
-        }
-    }
 
-    private var rowBackgroundColor: Color {
-        if item.isPinned {
-            return Color.orange.opacity(isSelected ? 0.20 : 0.10)
-        }
-        return isSelected ? Color.white.opacity(0.1) : Color.clear
-    }
-}
-
-private struct LauncherListCard: View {
-    let item: ClipboardItem
-    let displayTitle: String
-    let previewImage: NSImage?
-    let sourceAppIcon: NSImage?
-    let isSelected: Bool
-    let isGrouped: Bool
-    let onSelect: () -> Void
-    let onPaste: () -> Void
-    let onStartDrag: () -> Void
-
-    var body: some View {
-        HStack(spacing: 12) {
-            PreviewBadge(item: item, previewImage: previewImage, side: 36)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(displayTitle)
-                    .lineLimit(1)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isSelected ? .white : .white.opacity(0.9))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                if !isGrouped {
-                    SourceApplicationBadge(
-                        sourceName: item.sourceApplicationName,
-                        sourceIcon: sourceAppIcon
-                    )
-                }
-            }
-
-            Spacer()
-
-            if item.isPinned {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.4))
-            }
-
-            if item.kind != .text {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(item.fileTypeToken.uppercased())
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.3))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
-
-                    if !isGrouped, !item.detailText.isEmpty {
-                        Text(item.detailText)
-                            .lineLimit(1)
-                            .font(.system(size: 11, weight: .regular))
-                            .foregroundStyle(isSelected ? .white.opacity(0.7) : .white.opacity(0.5))
-                    }
-                }
-            }
         }
         .padding(.horizontal, isGrouped ? 12 : 16)
         .padding(.vertical, isGrouped ? 7 : 8)
@@ -1810,23 +1732,16 @@ private struct LauncherFileGroupHeader: View {
 
 private struct LauncherTileCard: View {
     let item: ClipboardItem
-    let displayTitle: String
     let previewText: String?
     let previewImage: NSImage?
     let sourceAppIcon: NSImage?
     let isSelected: Bool
     let onSelect: () -> Void
-    let onCopy: () -> Void
     let onPaste: () -> Void
-    let onCopyPath: (() -> Void)?
-    let onOpen: (() -> Void)?
-    let onEdit: (() -> Void)?
-    let onDelete: () -> Void
-    let onPin: () -> Void
     let onStartDrag: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .topTrailing) {
                 PreviewCanvas(item: item, previewImage: previewImage, previewText: previewText)
 
@@ -1840,20 +1755,18 @@ private struct LauncherTileCard: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(displayTitle)
-                    .lineLimit(2)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
-
+            HStack {
                 SourceApplicationBadge(
                     sourceName: item.sourceApplicationName,
                     sourceIcon: sourceAppIcon
                 )
+
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 8)
-            .padding(.bottom, 8)
+            .frame(height: 34)
         }
+        .frame(maxWidth: .infinity, alignment: .top)
         .background(tileBackgroundColor)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
@@ -1885,41 +1798,6 @@ private struct LauncherTileCard: View {
     }
 }
 
-private struct PreviewBadge: View {
-    let item: ClipboardItem
-    let previewImage: NSImage?
-    let side: CGFloat
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.white.opacity(0.1))
-
-            if let previewImage {
-                Image(nsImage: previewImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: side, height: side)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            } else {
-                Image(systemName: iconName)
-                    .font(.system(size: side * 0.4))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-        }
-        .frame(width: side, height: side)
-    }
-
-    private var iconName: String {
-        switch item.kind {
-        case .text: return "text.alignleft"
-        case .image: return "photo.fill"
-        case .file: return item.primaryCategory == .video ? "film.fill" : "doc.fill"
-        }
-    }
-}
-
 private struct PreviewCanvas: View {
     let item: ClipboardItem
     let previewImage: NSImage?
@@ -1942,6 +1820,19 @@ private struct PreviewCanvas: View {
                     .font(.system(size: 12, weight: .regular))
                     .foregroundStyle(.white.opacity(0.8))
                     .padding(12)
+            } else if item.kind == .file {
+                VStack(spacing: 8) {
+                    Image(systemName: item.primaryCategory.symbolName)
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white.opacity(0.34))
+
+                    Text(item.title)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                        .font(.system(size: 11, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .padding(.horizontal, 10)
+                }
             } else {
                 Image(systemName: item.primaryCategory.symbolName)
                     .font(.system(size: 24))

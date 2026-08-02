@@ -82,7 +82,6 @@ enum TextTransformAction: String, CaseIterable, Identifiable {
 }
 
 enum ClipboardDisplayMode: String, CaseIterable, Identifiable {
-    case compact
     case list
     case tiles
 
@@ -90,10 +89,13 @@ enum ClipboardDisplayMode: String, CaseIterable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .compact: return "list.bullet"
-        case .list: return "list.bullet.rectangle.portrait"
+        case .list: return "list.bullet"
         case .tiles: return "square.grid.2x2.fill"
         }
+    }
+
+    static func restored(from persistedValue: String?) -> ClipboardDisplayMode {
+        ClipboardDisplayMode(rawValue: persistedValue ?? "") ?? .list
     }
 }
 
@@ -882,9 +884,9 @@ final class ClipboardManager: ObservableObject {
         showPinnedOnly = UserDefaults.standard.object(forKey: Self.showPinnedOnlyKey) as? Bool ?? false
         isMonitoringEnabled = UserDefaults.standard.object(forKey: Self.monitoringEnabledKey) as? Bool ?? true
         preferredPasteMode = ClipboardPasteMode(rawValue: UserDefaults.standard.string(forKey: Self.preferredPasteModeKey) ?? "") ?? .rich
-        displayMode = ClipboardDisplayMode(
-            rawValue: UserDefaults.standard.string(forKey: Self.displayModeKey) ?? ""
-        ) ?? .list
+        displayMode = ClipboardDisplayMode.restored(
+            from: UserDefaults.standard.string(forKey: Self.displayModeKey)
+        )
         lastChangeCount = pasteboard.changeCount
 
         loadItems()
