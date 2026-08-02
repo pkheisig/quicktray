@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 
 private final class FloatingLauncherPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -11,6 +12,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private static let dragProtectionTimeout: TimeInterval = 0.75
     private static let defaultSize = NSSize(width: 810, height: 560)
     private static let minimumSize = NSSize(width: 600, height: 420)
+    private static let settingsSize = NSSize(width: 780, height: 650)
 
     private let clipboardManager: ClipboardManager
     private let settings: AppSettings
@@ -19,6 +21,9 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private var dragProtectionActive = false
     private var dragProtectionTimeoutWorkItem: DispatchWorkItem?
     private var dragProtectionMouseUpMonitor: Any?
+    private var modalInteractionActive = false
+    private var frameBeforeSettings: NSRect?
+    private var suppressFramePersistence = false
 
     init(clipboardManager: ClipboardManager, settings: AppSettings) {
         self.clipboardManager = clipboardManager
@@ -66,12 +71,23 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
             onClose: { [weak panel] in
                 panel?.orderOut(nil)
             },
-            onActivateItem: { [weak panel] item, paste in
+            onActivateItem: { [weak panel, weak settings] item, paste in
                 if paste {
                     clipboardManager.capturePasteTargetApplication()
                 }
-                panel?.orderOut(nil)
+                if settings?.dismissBehavior.shouldDismiss(afterPaste: paste) == true {
+                    panel?.orderOut(nil)
+                }
                 clipboardManager.copyToClipboard(item: item, shouldPaste: paste, refreshHistoryEntry: false)
+            },
+            onChooseExcludedApplications: { [weak self] in
+                self?.chooseExcludedApplications()
+            },
+            onSettingsPresentationChanged: { [weak self] isPresented in
+                self?.setSettingsPresented(isPresented)
+            },
+            onResetWindowLayout: { [weak self] in
+                self?.resetWindowLayout()
             },
             onBeginDrag: { [weak self] in
                 self?.beginDragProtection()
@@ -134,19 +150,31 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
+        guard !suppressFramePersistence, frameBeforeSettings == nil else { return }
         settings.setLauncherWindowOrigin(panel.frame.origin)
     }
 
     func windowDidResize(_ notification: Notification) {
+        guard !suppressFramePersistence, frameBeforeSettings == nil else { return }
         settings.setLauncherWindowSize(panel.frame.size)
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard !dragProtectionActive else { return }
+        guard !dragProtectionActive, !modalInteractionActive, panel.attachedSheet == nil else { return }
         hide()
     }
 
     private func positionPanel() {
+        switch settings.windowPlacement {
+        case .center:
+            centerPanel()
+            return
+        case .nearCursor:
+            positionNearCursor()
+            return
+        case .remember:
+            break
+        }
         guard let savedOrigin = settings.launcherWindowOrigin() else {
             centerPanel()
             return
@@ -164,6 +192,82 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         )
 
         panel.setFrameOrigin(origin)
+    }
+
+    private func positionNearCursor() {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? .zero
+        let desired = CGPoint(x: mouse.x - 32, y: mouse.y - panel.frame.height + 32)
+        let origin = CGPoint(
+            x: min(max(desired.x, visible.minX), max(visible.maxX - panel.frame.width, visible.minX)),
+            y: min(max(desired.y, visible.minY), max(visible.maxY - panel.frame.height, visible.minY))
+        )
+        panel.setFrameOrigin(origin)
+    }
+
+    private func chooseExcludedApplications() {
+        guard panel.attachedSheet == nil else { return }
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Exclude Applications"
+        openPanel.prompt = "Exclude"
+        openPanel.allowedContentTypes = [.application]
+        openPanel.allowsMultipleSelection = true
+        openPanel.canChooseDirectories = false
+        openPanel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        modalInteractionActive = true
+        panel.beginSheet(openPanel) { [weak self] response in
+            guard let self else { return }
+            if response == .OK {
+                openPanel.urls.forEach { _ = self.settings.addExcludedApplication(at: $0) }
+            }
+            self.modalInteractionActive = false
+            self.panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func setSettingsPresented(_ presented: Bool) {
+        if presented {
+            guard frameBeforeSettings == nil else { return }
+            frameBeforeSettings = panel.frame
+            let screen = panel.screen ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+            let visible = screen?.visibleFrame ?? panel.frame
+            let size = NSSize(
+                width: min(max(panel.frame.width, Self.settingsSize.width), visible.width),
+                height: min(max(panel.frame.height, Self.settingsSize.height), visible.height)
+            )
+            let origin = CGPoint(
+                x: min(max(panel.frame.midX - size.width / 2, visible.minX), max(visible.maxX - size.width, visible.minX)),
+                y: min(max(panel.frame.midY - size.height / 2, visible.minY), max(visible.maxY - size.height, visible.minY))
+            )
+            suppressFramePersistence = true
+            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+            suppressFramePersistence = false
+        } else if let previousFrame = frameBeforeSettings {
+            frameBeforeSettings = nil
+            suppressFramePersistence = true
+            panel.setFrame(previousFrame, display: true)
+            suppressFramePersistence = false
+        }
+    }
+
+    private func resetWindowLayout() {
+        settings.resetLauncherWindowLayout()
+        let screen = panel.screen ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? panel.frame
+        let baseFrame = NSRect(
+            x: visible.midX - Self.defaultSize.width / 2,
+            y: visible.midY - Self.defaultSize.height / 2,
+            width: Self.defaultSize.width,
+            height: Self.defaultSize.height
+        )
+        if frameBeforeSettings != nil {
+            frameBeforeSettings = baseFrame
+            return
+        }
+        suppressFramePersistence = true
+        panel.setFrame(baseFrame, display: true)
+        suppressFramePersistence = false
     }
 
     private func beginDragProtection() {

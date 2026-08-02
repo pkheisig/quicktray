@@ -765,8 +765,10 @@ final class ClipboardManager: ObservableObject {
     static let shared = ClipboardManager()
 
     private static let retentionLimitKey = "unpinnedRetentionLimit"
+    private static let textRetentionLimitKey = "textRetentionLimit"
+    private static let imageRetentionLimitKey = "imageRetentionLimit"
+    private static let fileRetentionLimitKey = "fileRetentionLimit"
     private static let monitoringEnabledKey = "clipboardMonitoringEnabled"
-    private static let preferredPasteModeKey = "preferredPasteMode"
     private static let selectedCategoryKey = "selectedCategory"
     private static let fileTypeFilterKey = "fileTypeFilter"
     private static let showPinnedOnlyKey = "showPinnedOnly"
@@ -778,11 +780,9 @@ final class ClipboardManager: ObservableObject {
     private static let stackPasteTimeout: TimeInterval = 45
     private static let stackCaptureWindow: TimeInterval = 15 * 60
 
-    @Published var unpinnedRetentionLimit: Int {
-        didSet {
-            persistAndApplyRetentionLimit()
-        }
-    }
+    @Published var textRetentionLimit: Int { didSet { persistAndApplyRetentionLimits() } }
+    @Published var imageRetentionLimit: Int { didSet { persistAndApplyRetentionLimits() } }
+    @Published var fileRetentionLimit: Int { didSet { persistAndApplyRetentionLimits() } }
 
     @Published var items: [ClipboardItem] = [] {
         didSet {
@@ -830,12 +830,6 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    @Published var preferredPasteMode: ClipboardPasteMode {
-        didSet {
-            UserDefaults.standard.set(preferredPasteMode.rawValue, forKey: Self.preferredPasteModeKey)
-        }
-    }
-
     @Published var displayMode: ClipboardDisplayMode {
         didSet {
             UserDefaults.standard.set(displayMode.rawValue, forKey: Self.displayModeKey)
@@ -844,6 +838,8 @@ final class ClipboardManager: ObservableObject {
     @Published private(set) var displayedItems: [ClipboardItem] = []
     @Published private(set) var displayRevision = 0
     @Published private(set) var previewImages: [UUID: NSImage] = [:]
+    @Published private(set) var monitoringPausedUntil: Date?
+    @Published private(set) var monitoringPausedIndefinitely = false
 
     private let pasteboard = NSPasteboard.general
     private let previewQueue = DispatchQueue(label: "com.gemini.quicktray.previews", qos: .userInitiated)
@@ -901,20 +897,27 @@ final class ClipboardManager: ObservableObject {
     }
 
     private init() {
-        let savedLimit = UserDefaults.standard.integer(forKey: Self.retentionLimitKey)
-        let initialLimit = savedLimit > 0 ? savedLimit : Self.defaultUnpinnedRetentionLimit
-        unpinnedRetentionLimit = Self.clampedRetentionLimit(initialLimit)
+        let defaults = UserDefaults.standard
+        let legacyLimit = defaults.integer(forKey: Self.retentionLimitKey)
+        let fallbackLimit = legacyLimit > 0 ? legacyLimit : Self.defaultUnpinnedRetentionLimit
+        let restoredLimit: (String) -> Int = { key in
+            let saved = defaults.integer(forKey: key)
+            return Self.clampedRetentionLimit(saved > 0 ? saved : fallbackLimit)
+        }
+        textRetentionLimit = restoredLimit(Self.textRetentionLimitKey)
+        imageRetentionLimit = restoredLimit(Self.imageRetentionLimitKey)
+        fileRetentionLimit = restoredLimit(Self.fileRetentionLimitKey)
         selectedCategory = ClipboardCategory(
             rawValue: UserDefaults.standard.string(forKey: Self.selectedCategoryKey) ?? ""
         ) ?? .mixed
         fileTypeFilter = UserDefaults.standard.string(forKey: Self.fileTypeFilterKey) ?? "all"
         showPinnedOnly = UserDefaults.standard.object(forKey: Self.showPinnedOnlyKey) as? Bool ?? false
         isMonitoringEnabled = UserDefaults.standard.object(forKey: Self.monitoringEnabledKey) as? Bool ?? true
-        preferredPasteMode = ClipboardPasteMode(rawValue: UserDefaults.standard.string(forKey: Self.preferredPasteModeKey) ?? "") ?? .rich
         displayMode = ClipboardDisplayMode.restored(
             from: UserDefaults.standard.string(forKey: Self.displayModeKey)
         )
         lastChangeCount = pasteboard.changeCount
+        monitoringPausedUntil = nil
 
         loadItems()
         trimUnpinnedItemsToLimit()
@@ -1032,7 +1035,30 @@ final class ClipboardManager: ObservableObject {
         timer = nil
     }
 
+    var monitoringPauseLabel: String? {
+        if monitoringPausedIndefinitely { return "Paused until resumed" }
+        guard let monitoringPausedUntil, monitoringPausedUntil > Date() else { return nil }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return "Paused until \(formatter.string(from: monitoringPausedUntil))"
+    }
+
+    func pauseMonitoring(for interval: TimeInterval?) {
+        monitoringPausedIndefinitely = interval == nil
+        monitoringPausedUntil = interval.map { Date().addingTimeInterval($0) }
+    }
+
+    func resumeMonitoring() {
+        monitoringPausedIndefinitely = false
+        monitoringPausedUntil = nil
+    }
+
     func checkClipboard() {
+        if monitoringPausedIndefinitely { return }
+        if let pausedUntil = monitoringPausedUntil {
+            if pausedUntil > Date() { return }
+            monitoringPausedUntil = nil
+        }
         if let suspendedUntil = clipboardMonitoringSuspendedUntil, suspendedUntil > Date() {
             return
         }
@@ -1053,6 +1079,7 @@ final class ClipboardManager: ObservableObject {
         let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
         if let fileURLs = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL],
            !fileURLs.isEmpty {
+            guard AppSettings.shared.captureFilesEnabled else { return }
             let captureDate = Date()
             let groupID = fileURLs.count > 1 ? UUID() : nil
             let capturedItems = fileURLs.enumerated().map { index, fileURL in
@@ -1072,6 +1099,7 @@ final class ClipboardManager: ObservableObject {
 
         let imageData = pasteboard.data(forType: .tiff) ?? NSImage(pasteboard: pasteboard)?.tiffRepresentation
         if let imageData {
+            guard AppSettings.shared.captureImagesEnabled, isWithinCaptureSizeLimit(imageData.count) else { return }
             addItem(
                 ClipboardItem(
                     imageData: imageData,
@@ -1089,6 +1117,8 @@ final class ClipboardManager: ObservableObject {
             ?? Self.extractStringFromRichPayload(rtfData: rtfData, htmlData: htmlData)
 
         if let string = plainString {
+            let payloadSize = string.lengthOfBytes(using: .utf8) + (rtfData?.count ?? 0) + (htmlData?.count ?? 0)
+            guard AppSettings.shared.captureTextEnabled, isWithinCaptureSizeLimit(payloadSize) else { return }
             addItem(
                 ClipboardItem(
                     text: string,
@@ -1198,7 +1228,6 @@ final class ClipboardManager: ObservableObject {
         item: ClipboardItem,
         shouldPaste: Bool = false,
         asPlainText: Bool = false,
-        pasteMode: ClipboardPasteMode? = nil,
         refreshHistoryEntry: Bool = false
     ) {
         if asPlainText {
@@ -1213,8 +1242,7 @@ final class ClipboardManager: ObservableObject {
             return
         }
 
-        let effectivePasteMode = pasteMode ?? preferredPasteMode
-        let signature = pasteboardSignature(for: item, pasteMode: effectivePasteMode)
+        let signature = pasteboardSignature(for: item)
 
         switch item.kind {
         case .text:
@@ -1222,16 +1250,14 @@ final class ClipboardManager: ObservableObject {
                 item,
                 signature: signature,
                 shouldPaste: shouldPaste,
-                refreshHistoryEntry: refreshHistoryEntry,
-                pasteMode: effectivePasteMode
+                refreshHistoryEntry: refreshHistoryEntry
             )
         case .file:
             writeStandardItemToPasteboard(
                 item,
                 signature: signature,
                 shouldPaste: shouldPaste,
-                refreshHistoryEntry: refreshHistoryEntry,
-                pasteMode: effectivePasteMode
+                refreshHistoryEntry: refreshHistoryEntry
             )
         case .image:
             writeImageToPasteboard(
@@ -1457,14 +1483,13 @@ final class ClipboardManager: ObservableObject {
 
     @discardableResult
     private func addItem(_ item: ClipboardItem, refreshTimestamp: Bool = false) -> ClipboardItem {
-        if let existingIndex = items.firstIndex(where: { $0.matchesSamePayload(as: item) }) {
+        if AppSettings.shared.duplicateBehavior == .moveToTop,
+           let existingIndex = items.firstIndex(where: { $0.matchesSamePayload(as: item) }) {
             let existingItem = items[existingIndex]
-            if refreshTimestamp {
-                existingItem.timestamp = item.timestamp
-                if item.kind == .file {
-                    existingItem.fileGroupID = item.fileGroupID
-                    existingItem.fileGroupIndex = item.fileGroupIndex
-                }
+            existingItem.timestamp = item.timestamp
+            if refreshTimestamp && item.kind == .file {
+                existingItem.fileGroupID = item.fileGroupID
+                existingItem.fileGroupIndex = item.fileGroupIndex
             }
             if existingItem.sourceApplicationName == nil {
                 existingItem.sourceApplicationName = item.sourceApplicationName
@@ -1632,18 +1657,12 @@ final class ClipboardManager: ObservableObject {
     }
 
     private func trimUnpinnedItemsToLimit() {
-        let unpinnedCount = items.filter { !$0.isPinned }.count
-        let excessCount = unpinnedCount - unpinnedRetentionLimit
-        guard excessCount > 0 else { return }
-
-        var remainingToRemove = excessCount
-        let sortedIndexes = items.enumerated().sorted { $0.element.timestamp < $1.element.timestamp }
         var indexesToRemove: [Int] = []
-        indexesToRemove.reserveCapacity(excessCount)
-
-        for (index, item) in sortedIndexes where !item.isPinned && remainingToRemove > 0 {
-            indexesToRemove.append(index)
-            remainingToRemove -= 1
+        for kind in [ClipboardKind.text, .image, .file] {
+            let candidates = items.enumerated()
+                .filter { !$0.element.isPinned && $0.element.kind == kind }
+                .sorted { $0.element.timestamp > $1.element.timestamp }
+            indexesToRemove.append(contentsOf: candidates.dropFirst(retentionLimit(for: kind)).map(\.offset))
         }
 
         guard !indexesToRemove.isEmpty else { return }
@@ -1800,15 +1819,14 @@ final class ClipboardManager: ObservableObject {
         _ item: ClipboardItem,
         signature: String,
         shouldPaste: Bool,
-        refreshHistoryEntry: Bool,
-        pasteMode: ClipboardPasteMode
+        refreshHistoryEntry: Bool
     ) {
         if !pasteboardAlreadyContains(signature: signature) {
             pasteboard.clearContents()
 
             switch item.kind {
             case .text:
-                writeTextItemToPasteboard(item, mode: pasteMode)
+                writeTextItemToPasteboard(item)
             case .file:
                 if let fileURL = item.fileURL {
                     pasteboard.writeObjects([fileURL as NSURL])
@@ -1956,10 +1974,10 @@ final class ClipboardManager: ObservableObject {
         lastWrittenPasteboardSignature == signature && pasteboard.changeCount == lastChangeCount
     }
 
-    private func pasteboardSignature(for item: ClipboardItem, pasteMode: ClipboardPasteMode) -> String {
+    private func pasteboardSignature(for item: ClipboardItem) -> String {
         switch item.kind {
         case .text:
-            return "item:\(item.id.uuidString):text:\(pasteMode.rawValue)"
+            return "item:\(item.id.uuidString):text:plain"
         case .image:
             return "item:\(item.id.uuidString):image"
         case .file:
@@ -1999,15 +2017,30 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    private func persistAndApplyRetentionLimit() {
-        let clamped = Self.clampedRetentionLimit(unpinnedRetentionLimit)
-        if clamped != unpinnedRetentionLimit {
-            unpinnedRetentionLimit = clamped
-            return
-        }
-
-        UserDefaults.standard.set(clamped, forKey: Self.retentionLimitKey)
+    private func persistAndApplyRetentionLimits() {
+        let text = Self.clampedRetentionLimit(textRetentionLimit)
+        let images = Self.clampedRetentionLimit(imageRetentionLimit)
+        let files = Self.clampedRetentionLimit(fileRetentionLimit)
+        if text != textRetentionLimit { textRetentionLimit = text; return }
+        if images != imageRetentionLimit { imageRetentionLimit = images; return }
+        if files != fileRetentionLimit { fileRetentionLimit = files; return }
+        UserDefaults.standard.set(text, forKey: Self.textRetentionLimitKey)
+        UserDefaults.standard.set(images, forKey: Self.imageRetentionLimitKey)
+        UserDefaults.standard.set(files, forKey: Self.fileRetentionLimitKey)
         trimUnpinnedItemsToLimit()
+    }
+
+    private func retentionLimit(for kind: ClipboardKind) -> Int {
+        switch kind {
+        case .text: return textRetentionLimit
+        case .image: return imageRetentionLimit
+        case .file: return fileRetentionLimit
+        }
+    }
+
+    private func isWithinCaptureSizeLimit(_ byteCount: Int) -> Bool {
+        let megabytes = AppSettings.shared.maxCaptureSizeMegabytes
+        return megabytes == 0 || byteCount <= megabytes * 1_048_576
     }
 
     static func normalize(_ value: String) -> String {
@@ -2198,26 +2231,9 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    private func writeTextItemToPasteboard(_ item: ClipboardItem, mode: ClipboardPasteMode) {
+    private func writeTextItemToPasteboard(_ item: ClipboardItem) {
         guard let textContent = item.textContent else { return }
-
-        switch mode {
-        case .plain:
-            pasteboard.setString(textContent, forType: .string)
-        case .rich:
-            pasteboard.setString(textContent, forType: .string)
-            if let richTextData = item.richTextData {
-                pasteboard.setData(richTextData, forType: .rtf)
-            }
-            if let htmlData = item.htmlData {
-                pasteboard.setData(htmlData, forType: .html)
-            }
-        case .markdown:
-            pasteboard.setString(textContent, forType: .string)
-            if let markdownRTF = Self.markdownRTFData(from: textContent) {
-                pasteboard.setData(markdownRTF, forType: .rtf)
-            }
-        }
+        pasteboard.setString(textContent, forType: .string)
     }
 
     private static func extractStringFromRichPayload(rtfData: Data?, htmlData: Data?) -> String? {
@@ -2246,16 +2262,6 @@ final class ClipboardManager: ObservableObject {
         }
 
         return nil
-    }
-
-    private static func markdownRTFData(from markdown: String) -> Data? {
-        guard let attributed = try? AttributedString(markdown: markdown) else { return nil }
-        let nsAttributed = NSAttributedString(attributed)
-        let fullRange = NSRange(location: 0, length: nsAttributed.length)
-        return try? nsAttributed.data(
-            from: fullRange,
-            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
-        )
     }
 
     private func formattedJSON(from input: String) -> String? {

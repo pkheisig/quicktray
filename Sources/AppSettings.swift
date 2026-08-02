@@ -16,6 +16,56 @@ struct ExcludedApplication: Identifiable, Hashable, Codable {
     var id: String { bundleIdentifier.lowercased() }
 }
 
+protocol SettingsPickerChoice: Hashable, CaseIterable, Identifiable {
+    var title: String { get }
+}
+
+enum ClipboardDuplicateBehavior: String, CaseIterable, Identifiable, SettingsPickerChoice {
+    case moveToTop
+    case keepCopies
+
+    var id: String { rawValue }
+    var title: String { self == .moveToTop ? "Move existing to top" : "Keep every copy" }
+}
+
+enum LauncherDismissBehavior: String, CaseIterable, Identifiable, SettingsPickerChoice {
+    case afterCopyOrPaste
+    case afterPaste
+    case never
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .afterCopyOrPaste: return "After copy or paste"
+        case .afterPaste: return "After paste only"
+        case .never: return "Never automatically"
+        }
+    }
+
+    func shouldDismiss(afterPaste: Bool) -> Bool {
+        switch self {
+        case .afterCopyOrPaste: return true
+        case .afterPaste: return afterPaste
+        case .never: return false
+        }
+    }
+}
+
+enum LauncherWindowPlacement: String, CaseIterable, Identifiable, SettingsPickerChoice {
+    case remember
+    case center
+    case nearCursor
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .remember: return "Remember position"
+        case .center: return "Center on screen"
+        case .nearCursor: return "Near pointer"
+        }
+    }
+}
+
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
@@ -24,9 +74,6 @@ final class AppSettings: ObservableObject {
     static let defaultToggleKeyCode = UInt32(kVK_ANSI_V)
     static let defaultToggleModifiers = UInt32(optionKey | cmdKey)
     static let defaultWindowOpacity = 0.92
-    static let defaultSettingsPanelOpacity = 0.73
-    static let minSettingsPanelOpacity = 0.30
-    static let maxSettingsPanelOpacity = 1.0
     static let defaultCommandVStripItemCount = 5
     static let minCommandVStripItemCount = 2
     static let maxCommandVStripItemCount = 10
@@ -95,7 +142,6 @@ final class AppSettings: ObservableObject {
         static let toggleKeyCode = "settings.toggleKeyCode"
         static let toggleModifiers = "settings.toggleModifiers"
         static let windowOpacity = "settings.windowOpacity"
-        static let settingsPanelOpacity = "settings.settingsPanelOpacity"
         static let launcherWindowOriginX = "settings.launcherWindowOriginX"
         static let launcherWindowOriginY = "settings.launcherWindowOriginY"
         static let launcherWindowWidth = "settings.launcherWindowWidth"
@@ -108,6 +154,13 @@ final class AppSettings: ObservableObject {
         static let launcherHoldDuration = "settings.launcherHoldDuration"
         static let excludedApplications = "settings.excludedApplications"
         static let ignoreTypelessTranscriptions = "settings.ignoreTypelessTranscriptions"
+        static let captureTextEnabled = "settings.captureTextEnabled"
+        static let captureImagesEnabled = "settings.captureImagesEnabled"
+        static let captureFilesEnabled = "settings.captureFilesEnabled"
+        static let maxCaptureSizeMegabytes = "settings.maxCaptureSizeMegabytes"
+        static let duplicateBehavior = "settings.duplicateBehavior"
+        static let dismissBehavior = "settings.dismissBehavior"
+        static let windowPlacement = "settings.windowPlacement"
     }
 
     @Published var toggleKeyCode: UInt32 {
@@ -121,17 +174,6 @@ final class AppSettings: ObservableObject {
     @Published var windowOpacity: Double {
         didSet {
             UserDefaults.standard.set(windowOpacity, forKey: Keys.windowOpacity)
-        }
-    }
-
-    @Published var settingsPanelOpacity: Double {
-        didSet {
-            let clamped = Self.clampedSettingsPanelOpacity(settingsPanelOpacity)
-            if clamped != settingsPanelOpacity {
-                settingsPanelOpacity = clamped
-                return
-            }
-            UserDefaults.standard.set(settingsPanelOpacity, forKey: Keys.settingsPanelOpacity)
         }
     }
 
@@ -186,17 +228,23 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var captureTextEnabled: Bool { didSet { UserDefaults.standard.set(captureTextEnabled, forKey: Keys.captureTextEnabled) } }
+    @Published var captureImagesEnabled: Bool { didSet { UserDefaults.standard.set(captureImagesEnabled, forKey: Keys.captureImagesEnabled) } }
+    @Published var captureFilesEnabled: Bool { didSet { UserDefaults.standard.set(captureFilesEnabled, forKey: Keys.captureFilesEnabled) } }
+    @Published var maxCaptureSizeMegabytes: Int { didSet { UserDefaults.standard.set(max(0, maxCaptureSizeMegabytes), forKey: Keys.maxCaptureSizeMegabytes) } }
+    @Published var duplicateBehavior: ClipboardDuplicateBehavior { didSet { UserDefaults.standard.set(duplicateBehavior.rawValue, forKey: Keys.duplicateBehavior) } }
+    @Published var dismissBehavior: LauncherDismissBehavior { didSet { UserDefaults.standard.set(dismissBehavior.rawValue, forKey: Keys.dismissBehavior) } }
+    @Published var windowPlacement: LauncherWindowPlacement { didSet { UserDefaults.standard.set(windowPlacement.rawValue, forKey: Keys.windowPlacement) } }
+
     private init() {
         let defaults = UserDefaults.standard
         let savedKeyCode = defaults.object(forKey: Keys.toggleKeyCode) != nil ? UInt32(defaults.integer(forKey: Keys.toggleKeyCode)) : nil
         let savedModifiers = defaults.object(forKey: Keys.toggleModifiers) != nil ? UInt32(defaults.integer(forKey: Keys.toggleModifiers)) : nil
         let savedOpacity = defaults.object(forKey: Keys.windowOpacity) as? Double
-        let savedSettingsPanelOpacity = defaults.object(forKey: Keys.settingsPanelOpacity) as? Double
 
         toggleKeyCode = savedKeyCode ?? Self.defaultToggleKeyCode
         toggleModifiers = Self.sanitizedModifiers(savedModifiers ?? Self.defaultToggleModifiers)
         windowOpacity = min(max(savedOpacity ?? Self.defaultWindowOpacity, 0.45), 1.0)
-        settingsPanelOpacity = Self.clampedSettingsPanelOpacity(savedSettingsPanelOpacity ?? Self.defaultSettingsPanelOpacity)
         focusSearchOnOpen = defaults.object(forKey: Keys.focusSearchOnOpen) as? Bool ?? true
         showLauncherOnStartup = defaults.object(forKey: Keys.showLauncherOnStartup) as? Bool ?? true
         launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -206,6 +254,13 @@ final class AppSettings: ObservableObject {
         let savedHoldDuration = defaults.object(forKey: Keys.launcherHoldDuration) as? Double
         launcherHoldDuration = Self.clampedLauncherHoldDuration(savedHoldDuration ?? Self.defaultLauncherHoldDuration)
         excludedApplications = Self.restoredExcludedApplications(from: defaults)
+        captureTextEnabled = defaults.object(forKey: Keys.captureTextEnabled) as? Bool ?? true
+        captureImagesEnabled = defaults.object(forKey: Keys.captureImagesEnabled) as? Bool ?? true
+        captureFilesEnabled = defaults.object(forKey: Keys.captureFilesEnabled) as? Bool ?? true
+        maxCaptureSizeMegabytes = defaults.object(forKey: Keys.maxCaptureSizeMegabytes) == nil ? 25 : max(0, defaults.integer(forKey: Keys.maxCaptureSizeMegabytes))
+        duplicateBehavior = ClipboardDuplicateBehavior(rawValue: defaults.string(forKey: Keys.duplicateBehavior) ?? "") ?? .moveToTop
+        dismissBehavior = LauncherDismissBehavior(rawValue: defaults.string(forKey: Keys.dismissBehavior) ?? "") ?? .afterCopyOrPaste
+        windowPlacement = LauncherWindowPlacement(rawValue: defaults.string(forKey: Keys.windowPlacement) ?? "") ?? .remember
         persistExcludedApplications()
     }
 
@@ -265,6 +320,13 @@ final class AppSettings: ObservableObject {
             width: defaults.double(forKey: Keys.launcherWindowWidth),
             height: defaults.double(forKey: Keys.launcherWindowHeight)
         )
+    }
+
+    func resetLauncherWindowLayout() {
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowWidth)
+        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowHeight)
     }
 
     func setHoldChooserWindowOrigin(_ origin: CGPoint) {
@@ -336,16 +398,19 @@ final class AppSettings: ObservableObject {
         toggleKeyCode = Self.defaultToggleKeyCode
         toggleModifiers = Self.defaultToggleModifiers
         windowOpacity = Self.defaultWindowOpacity
-        settingsPanelOpacity = Self.defaultSettingsPanelOpacity
         focusSearchOnOpen = true
         showLauncherOnStartup = true
         commandVStripItemCount = Self.defaultCommandVStripItemCount
         launcherHoldDuration = Self.defaultLauncherHoldDuration
         excludedApplications = Self.defaultExcludedApplications
-        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
-        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
-        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowWidth)
-        UserDefaults.standard.removeObject(forKey: Keys.launcherWindowHeight)
+        captureTextEnabled = true
+        captureImagesEnabled = true
+        captureFilesEnabled = true
+        maxCaptureSizeMegabytes = 25
+        duplicateBehavior = .moveToTop
+        dismissBehavior = .afterCopyOrPaste
+        windowPlacement = .remember
+        resetLauncherWindowLayout()
         UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginY)
     }
@@ -401,7 +466,4 @@ final class AppSettings: ObservableObject {
         min(max(value, minLauncherHoldDuration), maxLauncherHoldDuration)
     }
 
-    private static func clampedSettingsPanelOpacity(_ value: Double) -> Double {
-        min(max(value, minSettingsPanelOpacity), maxSettingsPanelOpacity)
-    }
 }

@@ -2,7 +2,6 @@ import SwiftUI
 import AppKit
 import Carbon.HIToolbox
 import QuickLook
-import UniformTypeIdentifiers
 
 struct LauncherFileGroup: Identifiable {
     let id: UUID
@@ -65,6 +64,9 @@ struct LauncherView: View {
     @ObservedObject private var snippetManager = SnippetManager.shared
     let onClose: () -> Void
     let onActivateItem: (ClipboardItem, Bool) -> Void
+    let onChooseExcludedApplications: () -> Void
+    let onSettingsPresentationChanged: (Bool) -> Void
+    let onResetWindowLayout: () -> Void
     let onBeginDrag: () -> Void
     let shouldHandleKeyEvent: (NSEvent) -> Bool
 
@@ -145,11 +147,11 @@ struct LauncherView: View {
         visibleTemplates.first(where: { $0.id == selectedSnippetID })
     }
 
-    private var historyLimitOptions: [Int] {
-        if defaultHistoryLimitOptions.contains(clipboardManager.unpinnedRetentionLimit) {
+    private func historyLimitOptions(for current: Int) -> [Int] {
+        if defaultHistoryLimitOptions.contains(current) {
             return defaultHistoryLimitOptions
         }
-        return (defaultHistoryLimitOptions + [clipboardManager.unpinnedRetentionLimit]).sorted()
+        return (defaultHistoryLimitOptions + [current]).sorted()
     }
 
     var body: some View {
@@ -182,10 +184,10 @@ struct LauncherView: View {
                     HStack {
                         Spacer()
                         settingsPanel
-                            .frame(width: 660, height: 420)
+                            .frame(width: 720, height: 540)
                             .background(
                                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(Color.black.opacity(settings.settingsPanelOpacity))
+                                    .fill(Color.black.opacity(0.88))
                                     .overlay(
                                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                                             .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
@@ -258,6 +260,9 @@ struct LauncherView: View {
         }
         .onChange(of: snippetManager.revision) { _ in
             syncSelection()
+        }
+        .onChange(of: showSettings) { isPresented in
+            onSettingsPresentationChanged(isPresented)
         }
         .onReceive(NotificationCenter.default.publisher(for: AppSettings.quickTrayLauncherDidShow)) { _ in
             selectedItemID = nil
@@ -499,29 +504,54 @@ struct LauncherView: View {
 
                 }
 
-                settingsSection(title: "Paste") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        PasteModeControl(selection: $clipboardManager.preferredPasteMode, compact: false)
-                        Text(clipboardManager.preferredPasteMode.helpText)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.55))
+                settingsSection(title: "Capture") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 16) {
+                            Toggle("Text", isOn: $settings.captureTextEnabled)
+                            Toggle("Images", isOn: $settings.captureImagesEnabled)
+                            Toggle("Files", isOn: $settings.captureFilesEnabled)
+                            Spacer()
+                            Picker("Maximum item", selection: $settings.maxCaptureSizeMegabytes) {
+                                Text("1 MB").tag(1)
+                                Text("5 MB").tag(5)
+                                Text("10 MB").tag(10)
+                                Text("25 MB").tag(25)
+                                Text("50 MB").tag(50)
+                                Text("100 MB").tag(100)
+                                Text("Unlimited").tag(0)
+                            }
+                            .frame(width: 150)
+                        }
+                        .toggleStyle(.checkbox)
+
+                        HStack(spacing: 8) {
+                            Toggle("Monitor clipboard", isOn: $clipboardManager.isMonitoringEnabled)
+                                .toggleStyle(.checkbox)
+                            Spacer()
+                            if let pauseLabel = clipboardManager.monitoringPauseLabel {
+                                Text(pauseLabel)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.55))
+                                Button("Resume") { clipboardManager.resumeMonitoring() }
+                                    .buttonStyle(QuickGlassButtonStyle())
+                            } else {
+                                Button("Pause 5m") { clipboardManager.pauseMonitoring(for: 5 * 60) }
+                                Button("Pause 1h") { clipboardManager.pauseMonitoring(for: 60 * 60) }
+                                Button("Pause") { clipboardManager.pauseMonitoring(for: nil) }
+                            }
+                        }
+                        .buttonStyle(QuickGlassButtonStyle())
                     }
                 }
 
-                settingsSection(title: "Appearance") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Settings transparency: \(Int(((1 - settings.settingsPanelOpacity) * 100).rounded()))%")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.75))
-
-                        Slider(
-                            value: Binding(
-                                get: { 1 - settings.settingsPanelOpacity },
-                                set: { settings.settingsPanelOpacity = 1 - $0 }
-                            ),
-                            in: (1 - AppSettings.maxSettingsPanelOpacity)...(1 - AppSettings.minSettingsPanelOpacity),
-                            step: 0.01
-                        )
+                settingsSection(title: "Behavior") {
+                    HStack(spacing: 18) {
+                        compactPicker("Duplicates", selection: $settings.duplicateBehavior)
+                        compactPicker("Close window", selection: $settings.dismissBehavior)
+                        compactPicker("Window position", selection: $settings.windowPlacement)
+                        Spacer()
+                        Button("Reset Window") { onResetWindowLayout() }
+                            .buttonStyle(QuickGlassButtonStyle())
                     }
                 }
 
@@ -553,7 +583,7 @@ struct LauncherView: View {
                         }
 
                         Button("Add App…") {
-                            chooseExcludedApplications()
+                            onChooseExcludedApplications()
                         }
                         .buttonStyle(QuickGlassButtonStyle())
                     }
@@ -566,13 +596,11 @@ struct LauncherView: View {
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(.white.opacity(0.72))
 
-                            Picker("Keep History", selection: $clipboardManager.unpinnedRetentionLimit) {
-                                ForEach(historyLimitOptions, id: \.self) { limit in
-                                    Text("Keep last \(limit)").tag(limit)
-                                }
+                            HStack(spacing: 10) {
+                                retentionPicker("Text", selection: $clipboardManager.textRetentionLimit)
+                                retentionPicker("Images", selection: $clipboardManager.imageRetentionLimit)
+                                retentionPicker("Files", selection: $clipboardManager.fileRetentionLimit)
                             }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
                         }
 
                         Spacer()
@@ -660,7 +688,7 @@ struct LauncherView: View {
                     )
                     Button("Paste Next") {
                         clipboardManager.pasteNextStackItem()
-                        onClose()
+                        dismissAfterAction(paste: true)
                     }
                     .buttonStyle(QuickGlassButtonStyle(fill: .white.opacity(0.12)))
                     Button("Clear") {
@@ -692,6 +720,39 @@ struct LauncherView: View {
                         .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
                 )
         )
+    }
+
+    private func compactPicker<Value: SettingsPickerChoice>(
+        _ title: String,
+        selection: Binding<Value>
+    ) -> some View where Value.AllCases: RandomAccessCollection {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.52))
+            Picker(title, selection: selection) {
+                ForEach(Value.allCases) { option in
+                    Text(option.title).tag(option)
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 170)
+        }
+    }
+
+    private func retentionPicker(_ title: String, selection: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.52))
+            Picker(title, selection: selection) {
+                ForEach(historyLimitOptions(for: selection.wrappedValue), id: \.self) { limit in
+                    Text("\(limit)").tag(limit)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 72)
+        }
     }
 
     private var contentArea: some View {
@@ -830,8 +891,14 @@ struct LauncherView: View {
         if shouldPaste {
             clipboardManager.capturePasteTargetApplication()
         }
-        onClose()
+        dismissAfterAction(paste: shouldPaste)
         clipboardManager.copyFileGroupToClipboard(group.items, shouldPaste: shouldPaste)
+    }
+
+    private func dismissAfterAction(paste: Bool) {
+        if settings.dismissBehavior.shouldDismiss(afterPaste: paste) {
+            onClose()
+        }
     }
 
     @ViewBuilder
@@ -904,7 +971,7 @@ struct LauncherView: View {
                                     isSelected: template.id == selectedSnippetID,
                                     onSelect: { selectedSnippetID = template.id },
                                     onPaste: {
-                                        onClose()
+                                        dismissAfterAction(paste: true)
                                         snippetManager.pasteTemplate(template, shouldPaste: true)
                                     },
                                     onEdit: {
@@ -980,7 +1047,7 @@ struct LauncherView: View {
         guard let selectedItem else { return }
         if asPlainText {
             clipboardManager.capturePasteTargetApplication()
-            onClose()
+            dismissAfterAction(paste: true)
             clipboardManager.copyToClipboard(item: selectedItem, shouldPaste: true, asPlainText: true)
             return
         }
@@ -1001,7 +1068,7 @@ struct LauncherView: View {
     private func pasteSelectedTemplate() {
         guard let selectedTemplate else { return }
         clipboardManager.capturePasteTargetApplication()
-        onClose()
+        dismissAfterAction(paste: true)
         snippetManager.pasteTemplate(selectedTemplate, shouldPaste: true)
     }
 
@@ -1216,7 +1283,7 @@ struct LauncherView: View {
             case kVK_ANSI_V:
                 clipboardManager.capturePasteTargetApplication()
                 clipboardManager.pasteNextStackItem()
-                onClose()
+                dismissAfterAction(paste: true)
                 return true
             default:
                 break
@@ -1434,24 +1501,6 @@ struct LauncherView: View {
         clipboardManager.removeItems(ids: Set(items.map(\.id)))
     }
 
-    private func chooseExcludedApplications() {
-        let panel = NSOpenPanel()
-        panel.title = "Exclude Apps from Clipboard History"
-        panel.prompt = "Exclude"
-        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
-        panel.allowedContentTypes = [.application]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-
-        panel.begin { response in
-            guard response == .OK else { return }
-            for applicationURL in panel.urls {
-                settings.addExcludedApplication(at: applicationURL)
-            }
-        }
-    }
-
 }
 
 private struct LauncherBackdrop: View {
@@ -1550,35 +1599,6 @@ private struct ModeToggle: View {
         }
         .padding(2)
         .background(Color.black.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-private struct PasteModeControl: View {
-    @Binding var selection: ClipboardPasteMode
-    let compact: Bool
-
-    var body: some View {
-        HStack(spacing: compact ? 4 : 6) {
-            ForEach(ClipboardPasteMode.allCases) { mode in
-                Button {
-                    selection = mode
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: mode.symbolName)
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(compact ? mode.shortTitle : mode.title)
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .foregroundStyle(selection == mode ? Color.white : Color.white.opacity(0.58))
-                    .padding(.horizontal, compact ? 8 : 10)
-                    .padding(.vertical, 7)
-                    .background(selection == mode ? Color.white.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(compact ? 3 : 4)
-        .background(Color.black.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
