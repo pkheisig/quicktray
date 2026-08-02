@@ -2,6 +2,7 @@
 set -e
 
 APP_NAME="QuickTray"
+BUNDLE_ID=$(plutil -extract CFBundleIdentifier raw -o - Info.plist)
 BUILD_DIR="build"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 SOURCES=$(find Sources -name '*.swift' | sort)
@@ -39,7 +40,7 @@ if [ -f "Resources/AppIcon.icns" ]; then
 fi
 
 echo "Signing app..."
-# Try to find a valid developer identity to avoid macOS resetting Accessibility permissions on every build.
+# Prefer a stable developer identity when one is available.
 IDENTITY=$(security find-identity -v -p codesigning | grep "Apple Development" | head -1 | awk '{print $2}')
 if [ -z "$IDENTITY" ]; then
     # Fallback to ad-hoc signing
@@ -53,5 +54,8 @@ fi
 echo "Copying to /Applications..."
 rm -rf "/Applications/$APP_NAME.app"
 cp -R "$APP_BUNDLE" /Applications/
+
+echo "Resetting macOS privacy permissions for $APP_NAME..."
+tccutil reset All "$BUNDLE_ID"
 
 echo "Done! App is at $APP_BUNDLE and copied to /Applications"
