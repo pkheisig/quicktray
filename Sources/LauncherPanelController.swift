@@ -22,6 +22,7 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     private var dragProtectionTimeoutWorkItem: DispatchWorkItem?
     private var dragProtectionMouseUpMonitor: Any?
     private var modalInteractionActive = false
+    private var activeOpenPanel: NSOpenPanel?
     private var frameBeforeSettings: NSRect?
     private var suppressFramePersistence = false
 
@@ -207,20 +208,25 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     }
 
     private func chooseExcludedApplications() {
-        guard panel.attachedSheet == nil else { return }
+        guard !modalInteractionActive, activeOpenPanel == nil else { return }
         let openPanel = NSOpenPanel()
         openPanel.title = "Exclude Applications"
         openPanel.prompt = "Exclude"
         openPanel.allowedContentTypes = [.application]
         openPanel.allowsMultipleSelection = true
         openPanel.canChooseDirectories = false
+        openPanel.canChooseFiles = true
         openPanel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        openPanel.level = NSWindow.Level(rawValue: panel.level.rawValue + 1)
         modalInteractionActive = true
-        panel.beginSheet(openPanel) { [weak self] response in
+        activeOpenPanel = openPanel
+        NSApp.activate(ignoringOtherApps: true)
+        openPanel.begin { [weak self] response in
             guard let self else { return }
             if response == .OK {
                 openPanel.urls.forEach { _ = self.settings.addExcludedApplication(at: $0) }
             }
+            self.activeOpenPanel = nil
             self.modalInteractionActive = false
             self.panel.makeKeyAndOrderFront(nil)
         }
