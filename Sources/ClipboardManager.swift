@@ -99,6 +99,33 @@ enum ClipboardDisplayMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum ClipboardExclusionRules {
+    static func shouldIgnore(
+        sourceName: String?,
+        sourceBundleIdentifier: String?,
+        excludedApplications: [ExcludedApplication],
+        recentlyInjectedByExcludedApplication: Bool,
+        typelessFallbackActive: Bool
+    ) -> Bool {
+        if let sourceBundleIdentifier,
+           excludedApplications.contains(where: {
+               $0.bundleIdentifier.caseInsensitiveCompare(sourceBundleIdentifier) == .orderedSame
+           }) {
+            return true
+        }
+
+        if sourceBundleIdentifier == nil,
+           let sourceName,
+           excludedApplications.contains(where: {
+               $0.displayName.localizedCaseInsensitiveCompare(sourceName) == .orderedSame
+           }) {
+            return true
+        }
+
+        return recentlyInjectedByExcludedApplication || typelessFallbackActive
+    }
+}
+
 final class ClipboardItem: Identifiable, Hashable, Codable {
     let id: UUID
     let kind: ClipboardKind
@@ -831,7 +858,6 @@ final class ClipboardManager: ObservableObject {
     private var stackCursor = 0
     private var stackQueueRevision = -1
     private var lastStackPasteDate: Date?
-    private var sourceAppIconCache: [String: NSImage] = [:]
     private var pendingPasteTargetProcessIdentifier: pid_t?
     private var lastPasteTargetProcessIdentifier: pid_t?
     private var previewLoadsInFlight: Set<UUID> = []
@@ -840,13 +866,14 @@ final class ClipboardManager: ObservableObject {
     private var saveItemsWorkItem: DispatchWorkItem?
     private var saveItemsGeneration = 0
     private var clipboardMonitoringSuspendedUntil: Date?
-    private var typelessPasteEventTap: CFMachPort?
-    private var typelessPasteEventSource: CFRunLoopSource?
+    private var excludedAppPasteEventTap: CFMachPort?
+    private var excludedAppPasteEventSource: CFRunLoopSource?
     private var lastPasteShortcutDate: Date?
-    private var lastTypelessPasteShortcutDate: Date?
+    private var lastExcludedAppPasteShortcutDate: Date?
     private static let postPasteMonitoringSuspension: TimeInterval = 0.5
-    private static let typelessPasteIgnoreWindow: TimeInterval = 2.0
+    private static let excludedAppPasteIgnoreWindow: TimeInterval = 2.0
     private static let typelessPasteFallbackIgnoreWindow: TimeInterval = 0.9
+    private static let parrotGeneratedEventMarker: Int64 = 0x5041_5252_4F54
 
     private static func clampedRetentionLimit(_ value: Int) -> Int {
         min(max(value, minUnpinnedRetentionLimit), maxUnpinnedRetentionLimit)
@@ -896,7 +923,7 @@ final class ClipboardManager: ObservableObject {
         }
         loadInitialPreviews()
         refreshDisplayedItemsNow()
-        installTypelessPasteEventMonitor()
+        installExcludedAppPasteEventMonitor()
         if isMonitoringEnabled {
             startMonitoring()
         }
@@ -974,43 +1001,6 @@ final class ClipboardManager: ObservableObject {
         if let fallbackApplication = Self.visibleApplicationBelowQuickTray(excluding: currentProcessIdentifier) {
             rememberPasteTarget(fallbackApplication)
         }
-    }
-
-    func sourceAppIcon(for item: ClipboardItem) -> NSImage? {
-        if let bundleIdentifier = item.sourceBundleIdentifier {
-            let cacheKey = "bundle:\(bundleIdentifier)"
-            if let cachedIcon = sourceAppIconCache[cacheKey] {
-                return cachedIcon
-            }
-
-            var icon: NSImage?
-            if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
-                icon = NSWorkspace.shared.icon(forFile: appURL.path)
-            } else if let runningIcon = NSWorkspace.shared.runningApplications
-                .first(where: { $0.bundleIdentifier == bundleIdentifier })?.icon {
-                icon = runningIcon
-            }
-
-            if let icon {
-                icon.size = NSSize(width: 14, height: 14)
-                sourceAppIconCache[cacheKey] = icon
-                return icon
-            }
-        }
-
-        guard let sourceName = item.sourceApplicationName else { return nil }
-        let cacheKey = "name:\(sourceName.lowercased())"
-        if let cachedIcon = sourceAppIconCache[cacheKey] {
-            return cachedIcon
-        }
-
-        guard let icon = NSWorkspace.shared.runningApplications
-            .first(where: { $0.localizedName == sourceName })?.icon else {
-            return nil
-        }
-        icon.size = NSSize(width: 14, height: 14)
-        sourceAppIconCache[cacheKey] = icon
-        return icon
     }
 
     var pasteStackItems: [ClipboardItem] {
@@ -1131,28 +1121,24 @@ final class ClipboardManager: ObservableObject {
     }
 
     private func shouldIgnoreClipboardChange(sourceName: String?, sourceBundleIdentifier: String?) -> Bool {
-        guard AppSettings.shared.ignoreTypelessTranscriptions else { return false }
+        let settings = AppSettings.shared
+        let now = Date()
+        let recentlyInjectedByExcludedApplication = lastExcludedAppPasteShortcutDate.map {
+            now.timeIntervalSince($0) <= Self.excludedAppPasteIgnoreWindow
+        } ?? false
+        let typelessFallbackActive = settings.isApplicationExcluded(
+            bundleIdentifier: AppSettings.typelessBundleIdentifier
+        ) && Self.isTypelessRunning() && (lastPasteShortcutDate.map {
+            now.timeIntervalSince($0) <= Self.typelessPasteFallbackIgnoreWindow
+        } ?? false)
 
-        if sourceBundleIdentifier == AppSettings.typelessBundleIdentifier {
-            return true
-        }
-
-        if sourceName?.localizedCaseInsensitiveCompare("Typeless") == .orderedSame {
-            return true
-        }
-
-        if let lastTypelessPasteShortcutDate,
-           Date().timeIntervalSince(lastTypelessPasteShortcutDate) <= Self.typelessPasteIgnoreWindow {
-            return true
-        }
-
-        if Self.isTypelessRunning(),
-           let lastPasteShortcutDate,
-           Date().timeIntervalSince(lastPasteShortcutDate) <= Self.typelessPasteFallbackIgnoreWindow {
-            return true
-        }
-
-        return false
+        return ClipboardExclusionRules.shouldIgnore(
+            sourceName: sourceName,
+            sourceBundleIdentifier: sourceBundleIdentifier,
+            excludedApplications: settings.excludedApplications,
+            recentlyInjectedByExcludedApplication: recentlyInjectedByExcludedApplication,
+            typelessFallbackActive: typelessFallbackActive
+        )
     }
 
     func clearAll() {
@@ -1746,8 +1732,8 @@ final class ClipboardManager: ObservableObject {
         }
     }
 
-    private func installTypelessPasteEventMonitor() {
-        guard typelessPasteEventTap == nil else { return }
+    private func installExcludedAppPasteEventMonitor() {
+        guard excludedAppPasteEventTap == nil else { return }
 
         let eventMask = CGEventMask(1 << CGEventType.keyDown.rawValue)
         let selfPointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
@@ -1763,7 +1749,7 @@ final class ClipboardManager: ObservableObject {
                 }
 
                 let manager = Unmanaged<ClipboardManager>.fromOpaque(refcon).takeUnretainedValue()
-                manager.noteTypelessPasteShortcutIfNeeded(event)
+                manager.noteExcludedAppPasteShortcutIfNeeded(event)
                 return Unmanaged.passUnretained(event)
             },
             userInfo: selfPointer
@@ -1775,23 +1761,27 @@ final class ClipboardManager: ObservableObject {
         CFRunLoopAddSource(CFRunLoopGetMain(), eventSource, .commonModes)
         CGEvent.tapEnable(tap: eventTap, enable: true)
 
-        typelessPasteEventTap = eventTap
-        typelessPasteEventSource = eventSource
+        excludedAppPasteEventTap = eventTap
+        excludedAppPasteEventSource = eventSource
     }
 
-    private func noteTypelessPasteShortcutIfNeeded(_ event: CGEvent) {
+    private func noteExcludedAppPasteShortcutIfNeeded(_ event: CGEvent) {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         guard keyCode == Int64(kVK_ANSI_V) else { return }
         guard event.flags.contains(.maskCommand) else { return }
 
         let sourceProcessIdentifier = pid_t(event.getIntegerValueField(.eventSourceUnixProcessID))
-        let isTypelessPasteShortcut = Self.isTypelessProcess(sourceProcessIdentifier)
+        let generatedEventMarker = event.getIntegerValueField(.eventSourceUserData)
 
         DispatchQueue.main.async { [weak self] in
             let now = Date()
             self?.lastPasteShortcutDate = now
-            if isTypelessPasteShortcut {
-                self?.lastTypelessPasteShortcutDate = now
+            let isExcludedParrotEvent = generatedEventMarker == Self.parrotGeneratedEventMarker
+                && AppSettings.shared.isApplicationExcluded(
+                    bundleIdentifier: AppSettings.parrotBundleIdentifier
+                )
+            if Self.isExcludedApplicationProcess(sourceProcessIdentifier) || isExcludedParrotEvent {
+                self?.lastExcludedAppPasteShortcutDate = now
             }
         }
     }
@@ -1938,28 +1928,13 @@ final class ClipboardManager: ObservableObject {
         return nil
     }
 
-    private static func isTypelessProcess(_ processIdentifier: pid_t) -> Bool {
+    private static func isExcludedApplicationProcess(_ processIdentifier: pid_t) -> Bool {
         guard processIdentifier > 0 else { return false }
         guard let application = NSRunningApplication(processIdentifier: processIdentifier) else { return false }
-
-        if application.bundleIdentifier == AppSettings.typelessBundleIdentifier {
-            return true
-        }
-
-        if application.localizedName?.localizedCaseInsensitiveContains("Typeless") == true {
-            return true
-        }
-
-        let candidatePaths = [
-            application.bundleURL?.path,
-            application.executableURL?.path
-        ]
-
-        return candidatePaths.contains { path in
-            guard let path else { return false }
-            return path.localizedCaseInsensitiveContains("/Typeless.app/")
-                || path.localizedCaseInsensitiveContains("/Typeless Helper")
-        }
+        return AppSettings.shared.isApplicationExcluded(
+            bundleIdentifier: application.bundleIdentifier,
+            name: application.localizedName
+        )
     }
 
     private static func isTypelessRunning() -> Bool {

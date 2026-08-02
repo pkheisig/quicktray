@@ -9,6 +9,13 @@ struct HotKeyChoice: Identifiable, Hashable {
     var id: UInt32 { keyCode }
 }
 
+struct ExcludedApplication: Identifiable, Hashable, Codable {
+    let bundleIdentifier: String
+    let displayName: String
+
+    var id: String { bundleIdentifier.lowercased() }
+}
+
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
@@ -27,6 +34,11 @@ final class AppSettings: ObservableObject {
     static let minLauncherHoldDuration = 0.2
     static let maxLauncherHoldDuration = 1.8
     static let typelessBundleIdentifier = "now.typeless.desktop"
+    static let parrotBundleIdentifier = "com.pkheisig.parrot"
+    static let defaultExcludedApplications = [
+        ExcludedApplication(bundleIdentifier: typelessBundleIdentifier, displayName: "Typeless"),
+        ExcludedApplication(bundleIdentifier: parrotBundleIdentifier, displayName: "Parrot")
+    ]
 
     static let availableToggleKeys: [HotKeyChoice] = [
         HotKeyChoice(keyCode: UInt32(kVK_Space), label: "Space"),
@@ -94,6 +106,7 @@ final class AppSettings: ObservableObject {
         static let showLauncherOnStartup = "settings.showLauncherOnStartup"
         static let commandVStripItemCount = "settings.commandVStripItemCount"
         static let launcherHoldDuration = "settings.launcherHoldDuration"
+        static let excludedApplications = "settings.excludedApplications"
         static let ignoreTypelessTranscriptions = "settings.ignoreTypelessTranscriptions"
     }
 
@@ -167,9 +180,9 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    @Published var ignoreTypelessTranscriptions: Bool {
+    @Published private(set) var excludedApplications: [ExcludedApplication] {
         didSet {
-            UserDefaults.standard.set(ignoreTypelessTranscriptions, forKey: Keys.ignoreTypelessTranscriptions)
+            persistExcludedApplications()
         }
     }
 
@@ -192,7 +205,8 @@ final class AppSettings: ObservableObject {
         commandVStripItemCount = Self.clampedCommandVStripItemCount(initialCommandVCount)
         let savedHoldDuration = defaults.object(forKey: Keys.launcherHoldDuration) as? Double
         launcherHoldDuration = Self.clampedLauncherHoldDuration(savedHoldDuration ?? Self.defaultLauncherHoldDuration)
-        ignoreTypelessTranscriptions = defaults.object(forKey: Keys.ignoreTypelessTranscriptions) as? Bool ?? true
+        excludedApplications = Self.restoredExcludedApplications(from: defaults)
+        persistExcludedApplications()
     }
 
     var toggleShortcutLabel: String {
@@ -275,6 +289,49 @@ final class AppSettings: ObservableObject {
         (toggleModifiers & flag) != 0
     }
 
+    func isApplicationExcluded(bundleIdentifier: String?, name: String? = nil) -> Bool {
+        if let bundleIdentifier {
+            return excludedApplications.contains {
+                $0.bundleIdentifier.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+            }
+        }
+
+        guard let name else { return false }
+        return excludedApplications.contains {
+            $0.displayName.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }
+    }
+
+    @discardableResult
+    func addExcludedApplication(at applicationURL: URL) -> Bool {
+        guard let bundle = Bundle(url: applicationURL),
+              let bundleIdentifier = bundle.bundleIdentifier,
+              !bundleIdentifier.isEmpty else {
+            return false
+        }
+
+        let displayName = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? applicationURL.deletingPathExtension().lastPathComponent
+        addExcludedApplication(
+            ExcludedApplication(bundleIdentifier: bundleIdentifier, displayName: displayName)
+        )
+        return true
+    }
+
+    func addExcludedApplication(_ application: ExcludedApplication) {
+        guard !isApplicationExcluded(bundleIdentifier: application.bundleIdentifier) else { return }
+        excludedApplications = (excludedApplications + [application]).sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    func removeExcludedApplication(bundleIdentifier: String) {
+        excludedApplications.removeAll {
+            $0.bundleIdentifier.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+        }
+    }
+
     func resetDefaults() {
         toggleKeyCode = Self.defaultToggleKeyCode
         toggleModifiers = Self.defaultToggleModifiers
@@ -284,13 +341,30 @@ final class AppSettings: ObservableObject {
         showLauncherOnStartup = true
         commandVStripItemCount = Self.defaultCommandVStripItemCount
         launcherHoldDuration = Self.defaultLauncherHoldDuration
-        ignoreTypelessTranscriptions = true
+        excludedApplications = Self.defaultExcludedApplications
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowOriginY)
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowWidth)
         UserDefaults.standard.removeObject(forKey: Keys.launcherWindowHeight)
         UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginX)
         UserDefaults.standard.removeObject(forKey: Keys.holdChooserWindowOriginY)
+    }
+
+    private func persistExcludedApplications() {
+        guard let data = try? JSONEncoder().encode(excludedApplications) else { return }
+        UserDefaults.standard.set(data, forKey: Keys.excludedApplications)
+    }
+
+    static func restoredExcludedApplications(from defaults: UserDefaults) -> [ExcludedApplication] {
+        if let data = defaults.data(forKey: Keys.excludedApplications),
+           let storedApplications = try? JSONDecoder().decode([ExcludedApplication].self, from: data) {
+            return storedApplications
+        }
+
+        let legacyTypelessEnabled = defaults.object(forKey: Keys.ignoreTypelessTranscriptions) as? Bool ?? true
+        return defaultExcludedApplications.filter {
+            legacyTypelessEnabled || $0.bundleIdentifier != typelessBundleIdentifier
+        }
     }
 
     func label(for keyCode: UInt32, modifiers: UInt32) -> String {

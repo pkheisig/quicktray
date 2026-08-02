@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Carbon.HIToolbox
 import QuickLook
+import UniformTypeIdentifiers
 
 struct LauncherFileGroup: Identifiable {
     let id: UUID
@@ -525,14 +526,36 @@ struct LauncherView: View {
                 }
 
                 settingsSection(title: "Privacy") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("Ignore Typeless transcriptions", isOn: $settings.ignoreTypelessTranscriptions)
-                            .controlSize(.small)
-                            .toggleStyle(.checkbox)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Excluded Apps")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.72))
 
-                        Text("Typeless paste injections stay out of history, even when they land in another app.")
+                        Text("Clipboard writes and injected dictation pastes from these apps stay out of history.")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.white.opacity(0.55))
+
+                        if settings.excludedApplications.isEmpty {
+                            Text("No apps excluded")
+                                .font(.system(size: 11, weight: .regular))
+                                .foregroundStyle(.white.opacity(0.42))
+                                .padding(.vertical, 4)
+                        } else {
+                            VStack(spacing: 4) {
+                                ForEach(settings.excludedApplications) { application in
+                                    ExcludedApplicationRow(application: application) {
+                                        settings.removeExcludedApplication(
+                                            bundleIdentifier: application.bundleIdentifier
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Button("Add App…") {
+                            chooseExcludedApplications()
+                        }
+                        .buttonStyle(QuickGlassButtonStyle())
                     }
                 }
 
@@ -1411,6 +1434,24 @@ struct LauncherView: View {
         clipboardManager.removeItems(ids: Set(items.map(\.id)))
     }
 
+    private func chooseExcludedApplications() {
+        let panel = NSOpenPanel()
+        panel.title = "Exclude Apps from Clipboard History"
+        panel.prompt = "Exclude"
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+
+        panel.begin { response in
+            guard response == .OK else { return }
+            for applicationURL in panel.urls {
+                settings.addExcludedApplication(at: applicationURL)
+            }
+        }
+    }
+
 }
 
 private struct LauncherBackdrop: View {
@@ -1557,6 +1598,57 @@ private struct UtilityBadge: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct ExcludedApplicationRow: View {
+    let application: ExcludedApplication
+    let onRemove: () -> Void
+
+    private var icon: NSImage? {
+        guard let applicationURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: application.bundleIdentifier
+        ) else { return nil }
+        return NSWorkspace.shared.icon(forFile: applicationURL.path)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Group {
+                if let icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(systemName: "app")
+                        .foregroundStyle(.white.opacity(0.45))
+                }
+            }
+            .frame(width: 20, height: 20)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(application.displayName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                Text(application.bundleIdentifier)
+                    .lineLimit(1)
+                    .font(.system(size: 9, weight: .regular, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+
+            Spacer()
+
+            Button(action: onRemove) {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            .buttonStyle(.plain)
+            .help("Remove \(application.displayName) from excluded apps")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
