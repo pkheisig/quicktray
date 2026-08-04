@@ -52,13 +52,17 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.minSize = Self.minimumSize
         panel.contentMinSize = Self.minimumSize
 
+        var restoredFrame = panel.frame
         if let savedSize = settings.launcherWindowSize() {
-            let restoredSize = NSSize(
+            restoredFrame.size = NSSize(
                 width: max(savedSize.width, Self.minimumSize.width),
                 height: max(savedSize.height, Self.minimumSize.height)
             )
-            panel.setFrame(NSRect(origin: panel.frame.origin, size: restoredSize), display: false)
         }
+        if let savedOrigin = settings.launcherWindowOrigin() {
+            restoredFrame.origin = savedOrigin
+        }
+        panel.setFrame(restoredFrame, display: false)
 
         self.panel = panel
 
@@ -151,12 +155,16 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard !suppressFramePersistence, frameBeforeSettings == nil else { return }
-        settings.setLauncherWindowOrigin(panel.frame.origin)
+        persistWindowFrame()
     }
 
     func windowDidResize(_ notification: Notification) {
+        persistWindowFrame()
+    }
+
+    func persistWindowFrame() {
         guard !suppressFramePersistence, frameBeforeSettings == nil else { return }
+        settings.setLauncherWindowOrigin(panel.frame.origin)
         settings.setLauncherWindowSize(panel.frame.size)
     }
 

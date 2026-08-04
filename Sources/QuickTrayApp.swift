@@ -68,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         launcherHotKeyHoldWorkItem?.cancel()
         launcherHotKeyHoldWorkItem = nil
+        panelController?.persistWindowFrame()
         clipboardManager.flushPendingSave()
     }
 
