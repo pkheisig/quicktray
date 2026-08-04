@@ -52,23 +52,15 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         panel.minSize = Self.minimumSize
         panel.contentMinSize = Self.minimumSize
 
-        var restoredFrame = panel.frame
-        if let savedSize = settings.launcherWindowSize() {
-            restoredFrame.size = NSSize(
-                width: max(savedSize.width, Self.minimumSize.width),
-                height: max(savedSize.height, Self.minimumSize.height)
-            )
-        }
-        if let savedOrigin = settings.launcherWindowOrigin() {
-            restoredFrame.origin = savedOrigin
-        }
-        panel.setFrame(restoredFrame, display: false)
-
         self.panel = panel
 
         super.init(window: panel)
         panel.delegate = self
         installDragProtectionMonitor()
+
+        let savedWindowOrigin = settings.launcherWindowOrigin()
+        let savedWindowSize = settings.launcherWindowSize()
+        suppressFramePersistence = true
 
         let rootView = LauncherView(
             clipboardManager: clipboardManager,
@@ -110,7 +102,8 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         hostingController.view.wantsLayer = true
         hostingController.view.layer?.backgroundColor = NSColor.clear.cgColor
         panel.contentViewController = hostingController
-
+        restoreSavedWindowFrame(origin: savedWindowOrigin, size: savedWindowSize)
+        suppressFramePersistence = false
     }
 
     @available(*, unavailable)
@@ -166,6 +159,21 @@ final class LauncherPanelController: NSWindowController, NSWindowDelegate {
         guard !suppressFramePersistence, frameBeforeSettings == nil else { return }
         settings.setLauncherWindowOrigin(panel.frame.origin)
         settings.setLauncherWindowSize(panel.frame.size)
+    }
+
+    private func restoreSavedWindowFrame(origin savedOrigin: CGPoint?, size savedSize: CGSize?) {
+        var restoredFrame = panel.frame
+        if let savedSize {
+            restoredFrame.size = NSSize(
+                width: max(savedSize.width, Self.minimumSize.width),
+                height: max(savedSize.height, Self.minimumSize.height)
+            )
+        }
+        if let savedOrigin {
+            restoredFrame.origin = savedOrigin
+        }
+
+        panel.setFrame(restoredFrame, display: false)
     }
 
     func windowDidResignKey(_ notification: Notification) {
