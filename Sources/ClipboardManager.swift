@@ -1550,7 +1550,7 @@ final class ClipboardManager: ObservableObject {
     private func sortedItems() -> [ClipboardItem] {
         items.sorted {
             if $0.isPinned != $1.isPinned {
-                return $0.isPinned && !$1.isPinned
+                return !$0.isPinned && $1.isPinned
             }
             return $0.timestamp > $1.timestamp
         }

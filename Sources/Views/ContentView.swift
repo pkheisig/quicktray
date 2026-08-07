@@ -794,6 +794,7 @@ struct LauncherView: View {
                                         onPaste: { onActivateItem(item, true) },
                                         onStartDrag: startDraggingSelectedItem
                                     )
+                                    .id(item.id)
                                     .contextMenu {
                                         itemContextMenu(for: item)
                                     }
@@ -1822,13 +1823,14 @@ private struct LauncherTileCard: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1)
         )
-        .simultaneousGesture(
-            TapGesture()
-                .onEnded(onSelect)
-        )
+        .contentShape(Rectangle())
         .simultaneousGesture(
             TapGesture(count: 2)
-                .onEnded(onPaste)
+                .onEnded {
+                    onSelect()
+                    onPaste()
+                }
+                .exclusively(before: TapGesture().onEnded(onSelect))
         )
         .onDrag {
             onStartDrag()
